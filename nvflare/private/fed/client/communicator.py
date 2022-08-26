@@ -120,6 +120,7 @@ class Communicator:
         self.retry = 1
         self.client_state_processors = client_state_processors
         self.compression = compression
+        self.grpc_channels = {}
 
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -340,21 +341,23 @@ class Communicator:
         aux_message.data["fl_context"].CopyFrom(make_context_data(fl_ctx))
 
         server_msg, retry = None, self.retry
-        with self.set_up_channel(servers[project_name]) as channel:
-            stub = fed_service.FederatedTrainingStub(channel)
-            while retry > 0:
-                try:
-                    self.logger.debug(f"Send AuxMessage to {project_name} server")
-                    server_msg = stub.AuxCommunicate(aux_message, timeout=timeout)
-                    # Clear the stopping flag
-                    # if the connection to server recovered.
-                    self.should_stop = False
+        if project_name not in self.grpc_channels:
+            self.grpc_channels[project_name] = self.set_up_channel(servers[project_name])
+        channel = self.grpc_channels[project_name]
+        stub = fed_service.FederatedTrainingStub(channel)
+        while retry > 0:
+            try:
+                self.logger.debug(f"Send AuxMessage to {project_name} server")
+                server_msg = stub.AuxCommunicate(aux_message, timeout=timeout)
+                # Clear the stopping flag
+                # if the connection to server recovered.
+                self.should_stop = False
 
-                    break
-                except grpc.RpcError as grpc_error:
-                    self.grpc_error_handler(servers[project_name], grpc_error, "AuxCommunicate", verbose=self.verbose)
-                    retry -= 1
-                    time.sleep(5)
+                break
+            except grpc.RpcError as grpc_error:
+                self.grpc_error_handler(servers[project_name], grpc_error, "AuxCommunicate", verbose=self.verbose)
+                retry -= 1
+                time.sleep(5)
         return server_msg
 
     def quit_remote(self, servers, task_name, token, ssid, fl_ctx: FLContext):

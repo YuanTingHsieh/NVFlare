@@ -26,9 +26,13 @@ from nvflare.app_common.mpi_proxy import mpi_pb2_grpc
 from nvflare.app_common.mpi_proxy.mpi_pb2 import AllgatherReply, AllreduceReply, BroadcastReply, ReduceOperation
 
 
+def _request_to_str(func_name, request):
+    return f"rank: {request.rank}, func: {func_name}:" f"seq: {request.sequence_number}, size: {request.ByteSize()}"
+
+
 class MpiLocalProxy(mpi_pb2_grpc.FederatedServicer):
 
-    NUM_THREADS = 8
+    NUM_THREADS = 16
     GRPC_OPTIONS = [
         ("grpc.max_send_message_length", 1024 * 1024 * 1024),
         ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
@@ -74,21 +78,28 @@ class MpiLocalProxy(mpi_pb2_grpc.FederatedServicer):
 
     # Servicer implementation
     def Allgather(self, request, context):
+        request_str = _request_to_str("Allgather", request)
+        engine = self.fl_context.get_engine()
+        engine.timestamp_service.add_timestamp(f"Get {request_str}")
         shareable = Shareable()
         shareable.set_header(CollectiveCommShareableHeader.IS_COLLECTIVE_AUX, True)
         shareable.set_header(CollectiveCommShareableHeader.SEQUENCE_NUMBER, request.sequence_number)
         shareable.set_header(CollectiveCommShareableHeader.RANK, request.rank)
         shareable.set_header(CollectiveCommShareableHeader.BUFFER, array("B", request.send_buffer))
 
-        engine = self.fl_context.get_engine()
+        engine.timestamp_service.add_timestamp(f"Before send {request_str}")
         result: Shareable = engine.send_aux_request(
             topic=CollectiveCommRequestTopic.ALL_GATHER, request=shareable, timeout=30.0, fl_ctx=self.fl_context
         )
+        engine.timestamp_service.add_timestamp(f"After send {request_str}")
         buffer = result.get_header(CollectiveCommShareableHeader.BUFFER)
 
         return AllgatherReply(receive_buffer=buffer.tobytes())
 
     def Allreduce(self, request, context):
+        request_str = _request_to_str("Allreduce", request)
+        engine = self.fl_context.get_engine()
+        engine.timestamp_service.add_timestamp(f"Get {request_str}")
         shareable = Shareable()
         shareable.set_header(CollectiveCommShareableHeader.IS_COLLECTIVE_AUX, True)
         shareable.set_header(CollectiveCommShareableHeader.SEQUENCE_NUMBER, request.sequence_number)
@@ -100,15 +111,19 @@ class MpiLocalProxy(mpi_pb2_grpc.FederatedServicer):
             CollectiveCommShareableHeader.REDUCE_FUNCTION, ReduceOperation.Name(request.reduce_operation)
         )
 
-        engine = self.fl_context.get_engine()
+        engine.timestamp_service.add_timestamp(f"Before send {request_str}")
         result = engine.send_aux_request(
             topic=CollectiveCommRequestTopic.ALL_REDUCE, request=shareable, timeout=30.0, fl_ctx=self.fl_context
         )
+        engine.timestamp_service.add_timestamp(f"After send {request_str}")
         buffer = result.get_header(CollectiveCommShareableHeader.BUFFER)
 
         return AllreduceReply(receive_buffer=buffer.tobytes())
 
     def Broadcast(self, request, context):
+        request_str = _request_to_str("Broadcast", request)
+        engine = self.fl_context.get_engine()
+        engine.timestamp_service.add_timestamp(f"Get {request_str}")
         shareable = Shareable()
         shareable.set_header(CollectiveCommShareableHeader.IS_COLLECTIVE_AUX, True)
         shareable.set_header(CollectiveCommShareableHeader.SEQUENCE_NUMBER, request.sequence_number)
@@ -116,16 +131,11 @@ class MpiLocalProxy(mpi_pb2_grpc.FederatedServicer):
         shareable.set_header(CollectiveCommShareableHeader.BUFFER, array("B", request.send_buffer))
         shareable.set_header(CollectiveCommShareableHeader.ROOT, request.root)
 
-        engine = self.fl_context.get_engine()
+        engine.timestamp_service.add_timestamp(f"Before send {request_str}")
         result = engine.send_aux_request(
             topic=CollectiveCommRequestTopic.BROADCAST, request=shareable, timeout=30.0, fl_ctx=self.fl_context
         )
+        engine.timestamp_service.add_timestamp(f"After send {request_str}")
+
         buffer = result.get_header(CollectiveCommShareableHeader.BUFFER)
-
         return BroadcastReply(receive_buffer=buffer.tobytes())
-
-    def _print_request(self, func_name, request, type_code):
-        buffer_array = array(type_code, request.send_buffer).tolist()
-        self._logger.info(
-            f"{func_name}: seq: {request.sequence_number}, rank: {request.rank}," f"buffer to list: {buffer_array}"
-        )

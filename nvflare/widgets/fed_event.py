@@ -69,6 +69,7 @@ class FedEventRunner(Widget):
             self.asked_to_stop = True
             if self.poster.is_alive():
                 self.poster.join()
+            self.engine.timestamp_service.write_timestamps("timestamp.txt")
         else:
             # handle outgoing fed events
             event_scope = fl_ctx.get_prop(key=FLContextKey.EVENT_SCOPE, default=EventScope.LOCAL)

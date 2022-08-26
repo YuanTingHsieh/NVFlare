@@ -20,6 +20,7 @@ from nvflare.apis.fl_constant import FLContextKey, ReturnCode
 from nvflare.apis.fl_context import FLContext, FLContextManager
 from nvflare.apis.shareable import Shareable, make_reply
 from nvflare.apis.workspace import Workspace
+from nvflare.fuel.utils.timestamp_service import TimestampService
 from nvflare.private.event import fire_event
 from nvflare.private.fed.utils.fed_utils import create_job_processing_context_properties
 from nvflare.security.logging import secure_format_exception
@@ -93,6 +94,8 @@ class ClientRunManager(ClientEngineExecutorSpec):
         )
 
         self.run_info = ClientRunInfo(job_id=job_id)
+        self.timestamp_service = TimestampService()
+        self.timestamp_service.add_timestamp("ClientRunManager initiated.")
 
         self.widgets = {WidgetID.INFO_COLLECTOR: InfoCollector(), WidgetID.FED_EVENT_RUNNER: ClientFedEventRunner()}
         for _, widget in self.widgets.items():
