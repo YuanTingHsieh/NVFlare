@@ -1,0 +1,16 @@
+{
+  "name": "av",
+  "resource_spec": {},
+  "min_clients" : 2,
+  "deploy_map": {
+    "app_server": [
+      "server"
+    ],
+    "app_us": [
+      "site-1"
+    ],
+    "app_cn": [
+      "site-2"
+    ]
+  }
+}

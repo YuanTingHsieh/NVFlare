@@ -1,0 +1,40 @@
+{
+  "format_version": 2,
+
+  "executors": [
+    {
+      "tasks": ["train"],
+      "executor": {
+        "name": "LauncherExecutor",
+        "args": {
+          "launcher_id": "launcher",
+          "pipe_id": "pipe"
+        }
+      }
+    }
+  ],
+  "task_result_filters": [
+  ],
+  "task_data_filters": [
+  ],
+  "components": [
+    {
+      "id": "launcher",
+      "name": "ML2FLLauncher",
+      "args": {
+        "script": "custom/cifar10_fl.py"
+      }
+    },
+    {
+      "id": "pipe",
+      "path": "nvflare.fuel.utils.pipe.file_pipe.FilePipe",
+      "args": {
+        "mode": "ACTIVE",
+        "file_accessor": {
+          "path": "nvflare.fuel.utils.pipe.fobs_file_accessor.FobsFileAccessor",
+          "args": {}
+        }
+      }
+    }
+  ]
+}

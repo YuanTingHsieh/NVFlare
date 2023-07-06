@@ -1,0 +1,14 @@
+{
+  "name": "bash-docker",
+  "resource_spec": {},
+  "min_clients" : 2,
+  "deploy_map": {
+    "app_server": [
+      "server"
+    ],
+    "app_client": [
+      "site-1",
+      "site-2"
+    ]
+  }
+}

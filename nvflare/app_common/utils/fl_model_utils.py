@@ -133,6 +133,10 @@ class FLModelUtils:
             kwargs[FLModelConst.META][MetaKey.JOB_ID] = fl_ctx.get_job_id()
             kwargs[FLModelConst.META][MetaKey.SITE_NAME] = fl_ctx.get_identity_name()
 
+        if fl_ctx is not None:
+            kwargs[FLModelConst.META][MetaKey.JOB_ID] = fl_ctx.get_job_id()
+            kwargs[FLModelConst.META][MetaKey.SITE_NAME] = fl_ctx.get_identity_name()
+
         result = FLModel(**kwargs)
         return result
 

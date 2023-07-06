@@ -1,0 +1,31 @@
+{
+  "format_version": 2,
+
+  "executors": [
+    {
+      "tasks": ["train"],
+      "executor": {
+        "name": "LauncherExecutor",
+        "args": {
+          "launcher_id": "launcher",
+          "from_nvflare": "from_nvflare",
+          "to_nvflare": "to_nvflare"
+        }
+      }
+    }
+  ],
+  "task_result_filters": [
+  ],
+  "task_data_filters": [
+  ],
+  "components": [
+    {
+      "id": "launcher",
+      "name": "SubprocessLauncher",
+      "args": {
+        "script": "bash custom/run_cifar10_ddp.sh 6666 custom/cifar10_ddp.py 1",
+        "clean_up_script": "pkill -f -9 \"cifar10_ddp.py\""
+      }
+    }
+  ]
+}
