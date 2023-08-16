@@ -15,6 +15,7 @@
 import os
 import shutil
 import time
+from typing import Optional
 
 from nvflare.fuel.utils.constants import Mode
 from nvflare.fuel.utils.pipe.file_accessor import FileAccessor
@@ -25,21 +26,21 @@ from nvflare.fuel.utils.validation_utils import check_object_type, check_positiv
 
 
 class FilePipe(Pipe):
-    def __init__(self, mode: Mode, root_path: str, file_check_interval=0.1):
+    def __init__(
+        self, mode: Mode, root_path: str = None, file_check_interval=0.1, file_accessor: Optional[FileAccessor] = None
+    ):
         """Implementation of communication through the file system.
 
         Args:
             root_path: root path
         """
         super().__init__(mode=mode)
-        check_str("root_path", root_path)
         check_positive_number("file_check_interval", file_check_interval)
 
-        if not os.path.exists(root_path):
-            # create the root path
-            os.makedirs(root_path)
+        self.root_path = None
+        if root_path is not None:
+            self.set_root_path(root_path)
 
-        self.root_path = root_path
         self.file_check_interval = file_check_interval
         self.pipe_path = None
         self.x_path = None
@@ -53,7 +54,11 @@ class FilePipe(Pipe):
             self.get_f = self.y_get
             self.put_f = self.y_put
 
-        self.accessor = FobsFileAccessor()  # default
+        if file_accessor is not None:
+            check_object_type("file_accessor", file_accessor, FileAccessor)
+            self.accessor = file_accessor
+        else:
+            self.accessor = FobsFileAccessor()  # default
 
     def set_file_accessor(self, accessor: FileAccessor):
         """Sets the file accessor to be used by the pipe.
@@ -64,6 +69,12 @@ class FilePipe(Pipe):
         """
         check_object_type("accessor", accessor, FileAccessor)
         self.accessor = accessor
+
+    def set_root_path(self, root_path: str):
+        check_str("root_path", root_path)
+        if not os.path.exists(root_path):
+            os.makedirs(root_path)
+        self.root_path = root_path
 
     @staticmethod
     def _make_dir(path):

@@ -1,0 +1,16 @@
+{
+  "name": "bash-ddp",
+  "resource_spec": {},
+  "min_clients" : 2,
+  "deploy_map": {
+    "app_server": [
+      "server"
+    ],
+    "app_one": [
+      "site-1"
+    ],
+    "app_two": [
+      "site-2"
+    ]
+  }
+}

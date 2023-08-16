@@ -1,0 +1,30 @@
+{
+  "format_version": 2,
+
+  "executors": [
+    {
+      "tasks": ["train"],
+      "executor": {
+        "path": "custom_executor.CustomExecutor",
+        "args": {
+          "data_exchanger_id": "data_exchanger",
+          "data_exchange_path": "/tmp/nvflare/av_us"
+        }
+      }
+    }
+  ],
+  "task_result_filters": [
+  ],
+  "task_data_filters": [
+  ],
+  "components": [
+    {
+      "id": "data_exchanger",
+      "path": "nvflare.app_opt.h5.data_exchanger.H5DataExchanger",
+      "args": {
+        "pipe_role": "x",
+        "heartbeat_timeout": 0
+      }
+    }
+  ]
+}

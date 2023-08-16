@@ -157,19 +157,16 @@ class ConfigService:
     def load_config_dict(
         cls, file_basename: str, search_dirs: Optional[List] = None, raise_exception: bool = True
     ) -> Optional[Dict]:
-        """
-        Load a specified config file ( ignore extension)
+        """Loads a specified config file (ignore extension)
+
         Args:
-            raise_exception: if True raise exception when error occurs
             file_basename: base name of the config file to be loaded.
-            for example: file_basename = config_fed_server.json
-            what the function does is to search for config file that matches
-            config_fed_server.[json|json.default|conf|conf.default|yml|yml.default]
-            in given search directories: cls._config_path
-            if json or json.default is not found;
-            then switch to Pyhoncon [.conf] or corresponding default file; if still not found; then we switch
-            to YAML files. We use OmegaConf to load YAML
+                for example: file_basename = config_fed_server
+                what the function does is to search for config file that matches the base name
+                the search order is defined in ConfigFormat.config_ext_formats
+                the loader to handle corresponding format is defined in ConfigFactory
             search_dirs: which directories to search.
+            raise_exception: if True raise exception when error occurs
 
         Returns: Dictionary from the configuration
                 if not found, exception will be raised.

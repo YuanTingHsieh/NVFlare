@@ -1,0 +1,45 @@
+{
+  "format_version": 2,
+
+  "executors": [
+    {
+      "tasks": ["train"],
+      "executor": {
+        "name": "LauncherExecutor",
+        "args": {
+          "launcher_id": "launcher",
+          "file_accessor_id": "h5_dxo_file_accessor",
+          "from_nvflare": "from_nvflare",
+          "to_nvflare": "to_nvflare"
+        }
+      }
+    }
+  ],
+  "task_result_filters": [
+  ],
+  "task_data_filters": [
+  ],
+  "components": [
+    {
+      "id": "launcher",
+      "name": "DockerLauncher",
+      "args": {
+        "script": "bash custom/script.sh",
+        "image": "nvcr.io/nvidia/pytorch:23.02-py3",
+        "options": {
+          "volumes": [
+            "/tmp/nvflare/cifar10:/tmp/nvflare/cifar10"
+          ],
+          "ipc_mode": "host",
+          "network_mode": "host",
+          "runtime": "nvidia"
+        }
+      }
+    },
+    {
+      "id": "h5_dxo_file_accessor",
+      "path": "nvflare.app_opt.h5.dxo_file_accessor.H5DXOFileAccessor",
+      "args": {}
+    }
+  ]
+}

@@ -24,36 +24,12 @@ class ExecutorTasks:
 
 class AppConstants(object):
 
-    CONFIG_PATH = "config_path"
-    MODEL_NETWORK = "model_network"
-    MULTI_GPU = "multi_gpu"
-    TRAIN_CONTEXT = "train_context"
-    DEVICE = "device"
-    MODEL_NAME = "model_name"
-    MODEL_URL = "model_url"
     START_ROUND = "start_round"
     CURRENT_ROUND = "current_round"
     CONTRIBUTION_ROUND = "contribution_round"
-    CONTRIBUTION_CLIENT = "contribution_client"
     NUM_ROUNDS = "num_rounds"
-    WAIT_AFTER_MIN_CLIENTS = "wait_after_min_clients"
 
-    NUM_TOTAL_STEPS = "num_total_steps"  # TOTAL_STEPS
-    NUM_EPOCHS_CURRENT_ROUND = "num_epochs_current_round"  # CURRENT_EPOCHS
-    NUM_TOTAL_EPOCHS = "num_total_epochs"  # LOCAL_EPOCHS
-    LOCAL_EPOCHS = "local_epochs"
-
-    IS_FIRST_ROUND = "is_first_round"
-    MY_RANK = "my_rank"
-    INITIAL_LEARNING_RATE = "initial_learning_rate"
-    CURRENT_LEARNING_RATE = "current_learning_rate"
-    NUMBER_OF_GPUS = "number_of_gpus"
-    META_COOKIE = "cookie"
-    META_DATA = "meta_data"
     GLOBAL_MODEL = "global_model"
-
-    IS_BEST = "is_best"
-    FAILURE = "failure"
 
     LOG_DIR = "model_log_dir"
     CKPT_PRELOAD_PATH = "ckpt_preload_path"
