@@ -1,3 +1,11 @@
+# NVFlare
+
+
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/nvflare)](https://pypi.org/project/nvflare/)
+[![PyPI version](https://badge.fury.io/py/nvflare.svg)](https://badge.fury.io/py/nvflare)
+[![license](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/NVIDIA/NVFlare/blob/main/LICENSE)
+[![Documentation Status](https://readthedocs.org/projects/nvflare/badge/?version=main)](https://nvflare.readthedocs.io/en/main/)
+
 **NV**IDIA **F**ederated **L**earning **A**pplication **R**untime **E**nvironment
 
 [NVIDIA FLARE](https://nvflare.readthedocs.io/en/main/index.html) is a domain-agnostic, open-source, extensible SDK that 
