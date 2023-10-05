@@ -20,7 +20,7 @@ def train(input_arr):
     return input_arr + 1
 
 
-def evaulate(input_arr):
+def evaluate(input_arr):
     # mock evaluation metrics
     return 100
 
@@ -43,7 +43,7 @@ def main():
     output_numpy_array = train(input_numpy_array)
 
     # evaluation
-    metrics = evaulate(input_numpy_array)
+    metrics = evaluate(input_numpy_array)
 
     # calculate difference here
     diff = output_numpy_array - input_numpy_array

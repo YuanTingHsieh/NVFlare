@@ -20,7 +20,7 @@ def train(input_arr):
     return input_arr + 1
 
 
-def evaulate(input_arr):
+def evaluate(input_arr):
     # mock evaluation metrics
     return 100
 
@@ -33,11 +33,7 @@ def main():
     sys_info = flare.system_info()
     print(f"system info is: {sys_info}")
 
-    total_rounds = sys_info["total_rounds"]
-
-    while True:
-        # get model from NVFlare
-        input_model = flare.receive()
+    for input_model in flare.receive_global_model():
         print(f"received weights is: {input_model.params}")
 
         input_numpy_array = input_model.params["numpy_key"]
@@ -46,7 +42,7 @@ def main():
         output_numpy_array = train(input_numpy_array)
 
         # evaluation
-        metrics = evaulate(input_numpy_array)
+        metrics = evaluate(input_numpy_array)
 
         sys_info = flare.system_info()
         print(f"system info is: {sys_info}")
@@ -62,9 +58,6 @@ def main():
                 current_round=input_model.current_round,
             )
         )
-
-        if input_model.current_round == total_rounds - 1:
-            break
 
 
 if __name__ == "__main__":
