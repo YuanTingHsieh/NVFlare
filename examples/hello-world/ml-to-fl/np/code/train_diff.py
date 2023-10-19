@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+
 import nvflare.client as flare
 
 
 def train(input_arr):
+    output_arr = copy.deepcopy(input_arr)
     # mock training with plus 1
-    return input_arr + 1
+    return output_arr + 1
 
 
 def evaluate(input_arr):

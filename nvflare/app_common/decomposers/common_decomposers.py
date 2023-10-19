@@ -23,11 +23,37 @@ import numpy as np
 from nvflare.app_common.abstract.exchange_task import ExchangeTask
 from nvflare.app_common.abstract.fl_model import FLModel
 from nvflare.app_common.abstract.learnable import Learnable
+from nvflare.app_common.abstract.metric_data import MetricData
 from nvflare.app_common.abstract.model import ModelLearnable
 from nvflare.app_common.widgets.event_recorder import _CtxPropReq, _EventReq, _EventStats
 from nvflare.fuel.utils import fobs
 from nvflare.fuel.utils.fobs.datum import DatumManager
 from nvflare.fuel.utils.fobs.decomposer import Decomposer, DictDecomposer, Externalizer, Internalizer
+
+
+class MetricDataDecomposer(fobs.Decomposer):
+    def supported_type(self):
+        return MetricData
+
+    def decompose(self, b: MetricData, manager: DatumManager = None) -> Any:
+        externalizer = Externalizer(manager)
+        return (
+            b.key,
+            externalizer.externalize(b.value),
+            externalizer.externalize(b.data_type),
+            externalizer.externalize(b.additional_args),
+        )
+
+    def recompose(self, data: tuple, manager: DatumManager = None) -> MetricData:
+        assert isinstance(data, tuple)
+        key, value, data_type, additional_args = data
+        internalizer = Internalizer(manager)
+        return MetricData(
+            key=key,
+            value=value,
+            data_type=internalizer.internalize(data_type),
+            additional_args=internalizer.internalize(additional_args),
+        )
 
 
 class ExchangeTaskDecomposer(fobs.Decomposer):

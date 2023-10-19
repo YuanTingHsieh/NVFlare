@@ -15,8 +15,10 @@
 
 # https://github.com/microsoft/pylance-release/issues/856
 
+from nvflare.apis.analytix import AnalyticsDataType
 from nvflare.app_common.abstract.fl_model import FLModel as FLModel
 from nvflare.app_common.abstract.fl_model import ParamsType as ParamsType
+from nvflare.app_common.abstract.metric_data import MetricData as MetricData
 
 from .api import DataExchangeException as DataExchangeException
 from .api import clear as clear
@@ -29,6 +31,7 @@ from .api import is_evaluate as is_evaluate
 from .api import is_running as is_running
 from .api import is_submit_model as is_submit_model
 from .api import is_train as is_train
+from .api import log as log
 from .api import receive as receive
 from .api import receive_global_model as receive_global_model
 from .api import send as send

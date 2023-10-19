@@ -42,7 +42,7 @@ FLMODEL_TEST_CASES = [FLModel(params=x, params_type=ParamsType.FULL) for x in TE
 
 
 @pytest.fixture
-def setup_common(request):
+def setup_filepipe(request):
     test_pipe_name = "test_pipe"
     test_topic = "test_topic"
     flare_decomposers.register()
@@ -89,6 +89,9 @@ def check_task_equivalence(a: ExchangeTask, b: ExchangeTask):
     else:
         for k, v in a.data.items():
             np.testing.assert_array_equal(v, b.data[k])
+
+
+setup_common = setup_filepipe
 
 
 class TestDataExchanger:

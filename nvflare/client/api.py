@@ -16,11 +16,13 @@ import os
 from typing import Dict, Optional, Union
 
 from nvflare.app_common.abstract.fl_model import FLModel
+from nvflare.app_common.abstract.metric_data import MetricData
 from nvflare.app_common.data_exchange.constants import ExchangeFormat
-from nvflare.app_common.data_exchange.data_exchanger import DataExchangeException
-from nvflare.app_common.data_exchange.file_pipe_data_exchanger import FilePipeDataExchanger
+from nvflare.app_common.data_exchange.data_exchanger import DataExchangeException, DataExchanger
 from nvflare.fuel.utils import fobs
 from nvflare.fuel.utils.import_utils import optional_import
+from nvflare.fuel.utils.pipe.file_pipe import FilePipe
+from nvflare.fuel.utils.pipe.ipc_apipe import IPCAPipe
 
 from .config import ClientConfig, ConfigKey, from_file
 from .constants import CONFIG_EXCHANGE
@@ -39,36 +41,51 @@ def init(config: Union[str, Dict] = f"config/{CONFIG_EXCHANGE}", rank: Optional[
     """
     global PROCESS_MODEL_REGISTRY  # Declare PROCESS_MODEL_REGISTRY as global
 
-    if rank is None:
-        rank = os.environ.get("RANK", "0")
+    try:
+        if rank is None:
+            rank = os.environ.get("RANK", "0")
 
-    if PROCESS_MODEL_REGISTRY:
-        raise RuntimeError("Can't call init twice.")
+        if PROCESS_MODEL_REGISTRY:
+            raise RuntimeError("Can't call init twice.")
 
-    if isinstance(config, str):
-        client_config = from_file(config_file=config)
-    elif isinstance(config, dict):
-        client_config = ClientConfig(config=config)
-    else:
-        raise ValueError("config should be either a string or dictionary.")
+        if isinstance(config, str):
+            client_config = from_file(config_file=config)
+        elif isinstance(config, dict):
+            client_config = ClientConfig(config=config)
+        else:
+            raise ValueError("config should be either a string or dictionary.")
 
-    dx = None
-    if rank == "0":
-        if client_config.get_exchange_format() == ExchangeFormat.PYTORCH:
-            tensor_decomposer, ok = optional_import(module="nvflare.app_opt.pt.decomposers", name="TensorDecomposer")
-            if ok:
-                fobs.register(tensor_decomposer)
+        dx = None
+        if rank == "0":
+            if client_config.get_exchange_format() == ExchangeFormat.PYTORCH:
+                tensor_decomposer, ok = optional_import(
+                    module="nvflare.app_opt.pt.decomposers", name="TensorDecomposer"
+                )
+                if ok:
+                    fobs.register(tensor_decomposer)
+                else:
+                    raise RuntimeError(f"Can't import TensorDecomposer for format: {ExchangeFormat.PYTORCH}")
+
+            # TODO: make Pipe configurable
+            pipe_args = client_config.get_pipe_args()
+            if client_config.get_pipe_class() == "FilePipe":
+                # pipe = FilePipe(Mode.PASSIVE, data_exchange_path)
+                pipe = FilePipe(**pipe_args)
+            elif client_config.get_pipe_class() == "IPCAPipe":
+                # pipe = CellPipe(root_url=client_config.get_root_url(), mode=Mode.ACTIVE, parent_url=client_config.get_flare_site_url())
+                pipe = IPCAPipe(**pipe_args)
             else:
-                raise RuntimeError(f"Can't import TensorDecomposer for format: {ExchangeFormat.PYTORCH}")
+                raise RuntimeError(f"Pipe class {client_config.get_pipe_class()} is not supported.")
 
-        # TODO: make Pipe configurable
-        dx = FilePipeDataExchanger(
-            supported_topics=client_config.get_supported_topics(),
-            data_exchange_path=client_config.get_exchange_path(),
-            pipe_name=client_config.get_pipe_name(),
-        )
+            dx = DataExchanger(
+                supported_topics=client_config.get_supported_topics(),
+                pipe=pipe,
+                pipe_name=client_config.get_pipe_name(),
+            )
 
-    PROCESS_MODEL_REGISTRY = ModelRegistry(client_config, rank, dx)
+        PROCESS_MODEL_REGISTRY = ModelRegistry(client_config, rank, dx)
+    except Exception as e:
+        print(f"Exception {e} happens in flare.init()")
 
 
 def _get_model_registry() -> ModelRegistry:
@@ -98,6 +115,12 @@ def send(fl_model: FLModel, clear_registry: bool = True) -> None:
     model_registry.submit_model(model=fl_model)
     if clear_registry:
         clear()
+
+
+def log(metric_data: MetricData):
+    """Logs the value to NVFlare side."""
+    model_registry = _get_model_registry()
+    model_registry.submit_task(data=metric_data, meta={}, return_code="ok")
 
 
 def clear():
@@ -146,7 +169,8 @@ def receive_global_model():
             input_model = receive()
             yield input_model
             clear()
-        except DataExchangeException:
+        except DataExchangeException as e:
+            print(f"GGG {e} GGG")
             break
 
 

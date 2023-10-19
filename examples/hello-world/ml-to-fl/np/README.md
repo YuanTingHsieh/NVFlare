@@ -89,11 +89,11 @@ nvflare simulator -n 2 -t 2 ./jobs/np_param_diff_transfer_full -w np_param_diff_
 ## Launch once for the whole job
 
 In some training scenarios, the data loading is taking a lot of time.
-And throughout the whole training job, we only want to load/setup the data once.
+And throughout the whole training job, we only want to load/set up the data once.
 
 In that case, we could use the "launch_once" option of "LauncherExecutor" and wraps our training script into a loop.
 
-We wraps the [./code/train_full.py](./code/train_full.py) into a loop: [./code/train_loop.py](./code/train_loop.py)
+We wrap the [./code/train_full.py](./code/train_full.py) into a loop: [./code/train_loop.py](./code/train_loop.py)
 
 Then we can create the job:
 
@@ -107,4 +107,24 @@ Then we can run it using the NVFlare Simulator:
 
 ```bash
 nvflare simulator -n 2 -t 2 ./jobs/np_loop -w np_loop_workspace
+```
+
+
+## Launch once for the whole job and with metrics streaming
+
+Sometimes we want to stream the training progress.
+We add flare.log to [./code/train_loop.py](./code/train_loop.py)
+
+Then we can create the job:
+
+```bash
+nvflare job create -force -j ./jobs/np_metrics -w sag_np_ipc_pipe -sd ./code/ \
+-f config_fed_client.conf app_script=train_metrics.py params_transfer_type=DIFF launch_once=true \
+-f config_fed_server.conf expected_data_kind=WEIGHT_DIFF
+```
+
+Then we can run it using the NVFlare Simulator:
+
+```bash
+nvflare simulator -n 2 -t 2 ./jobs/np_metrics -w np_metrics_workspace
 ```

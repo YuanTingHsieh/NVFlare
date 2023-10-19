@@ -15,16 +15,9 @@
 from typing import Any
 
 from nvflare.apis.analytix import AnalyticsDataType
+from nvflare.app_common.abstract.metric_data import MetricData
 from nvflare.fuel.utils.pipe.pipe import Message
 from nvflare.fuel.utils.pipe.pipe_handler import PipeHandler
-
-
-class MetricData:
-    def __init__(self, key, value, data_type: AnalyticsDataType, additional_args=None):
-        self.key = key
-        self.value = value
-        self.data_type = data_type
-        self.additional_args = {} if additional_args is None else additional_args
 
 
 class MetricsExchanger:
