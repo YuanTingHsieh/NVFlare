@@ -21,20 +21,13 @@ from nvflare.app_common.app_constant import AppConstants
 from nvflare.app_common.data_exchange.constants import ExchangeFormat
 from nvflare.app_common.executors.launcher_executor import LauncherExecutor
 from nvflare.client.config import ClientConfig, ConfigKey, TransferType
-from nvflare.client.constants import CONFIG_EXCHANGE
+from nvflare.client.constants import CONFIG_DATA_EXCHANGE
+from nvflare.client.utils import get_external_pipe_args, get_external_pipe_class
 from nvflare.fuel.utils.constants import Mode
 from nvflare.fuel.utils.pipe.file_pipe import FilePipe
 from nvflare.fuel.utils.pipe.ipc_ppipe import IPCPPipe
 from nvflare.fuel.utils.pipe.pipe import Pipe
 from nvflare.fuel.utils.validation_utils import check_object_type
-
-
-def get_pipe_class(pipe: Pipe) -> str:
-    if isinstance(pipe, IPCPPipe):
-        return "IPCAPipe"
-    elif isinstance(pipe, FilePipe):
-        return "FilePipe"
-    return ""
 
 
 class ClientAPILauncherExecutor(LauncherExecutor):
@@ -61,7 +54,6 @@ class ClientAPILauncherExecutor(LauncherExecutor):
         launch_once: bool = True,
         params_exchange_format: ExchangeFormat = ExchangeFormat.NUMPY,
         params_transfer_type: TransferType = TransferType.FULL,
-        analytic_sender_id: Optional[str] = None,
     ) -> None:
         """Initializes the ClientAPILauncherExecutor.
 
@@ -92,7 +84,6 @@ class ClientAPILauncherExecutor(LauncherExecutor):
             params_exchange_format (ExchangeFormat): What format to exchange the parameters.
             params_transfer_type (TransferType): How to transfer the parameters. FULL means the whole model parameters are sent.
                 DIFF means that only the difference is sent.
-            analytic_sender_id  (Optional[str]): Identifier for obtaining the AnalyticsSender from NVFlare components.
         """
         super().__init__(
             pipe_id=pipe_id,
@@ -114,7 +105,6 @@ class ClientAPILauncherExecutor(LauncherExecutor):
             from_nvflare_converter_id=from_nvflare_converter_id,
             to_nvflare_converter_id=to_nvflare_converter_id,
             launch_once=launch_once,
-            analytic_sender_id=analytic_sender_id,
         )
 
         self._params_exchange_format = params_exchange_format
@@ -142,10 +132,10 @@ class ClientAPILauncherExecutor(LauncherExecutor):
     def prepare_config_for_launch(self, shareable: Shareable, fl_ctx: FLContext):
         workspace = fl_ctx.get_engine().get_workspace()
         app_dir = workspace.get_app_dir(fl_ctx.get_job_id())
-        config_file = os.path.join(app_dir, workspace.config_folder, CONFIG_EXCHANGE)
+        config_file = os.path.join(app_dir, workspace.config_folder, CONFIG_DATA_EXCHANGE)
         total_rounds = shareable.get_header(AppConstants.NUM_ROUNDS)
 
-        # prepare config exchange for Client API
+        # prepare config exchange for data exchanger
         client_config = ClientConfig()
         config_dict = client_config.config
         config_dict[ConfigKey.TRAIN_WITH_EVAL] = self._train_with_evaluation
@@ -156,21 +146,9 @@ class ClientAPILauncherExecutor(LauncherExecutor):
         config_dict[ConfigKey.EVAL_TASK_NAME] = self._evaluate_task_name
         config_dict[ConfigKey.SUBMIT_MODEL_TASK_NAME] = self._submit_model_task_name
         config_dict[ConfigKey.PIPE_NAME] = self._pipe_name
-        config_dict[ConfigKey.PIPE_CLASS] = get_pipe_class(self._pipe)
-        config_dict[ConfigKey.PIPE_ARGS] = self.get_external_pipe_args(fl_ctx)
+        config_dict[ConfigKey.PIPE_CLASS] = get_external_pipe_class(self._pipe)
+        config_dict[ConfigKey.PIPE_ARGS] = get_external_pipe_args(self._pipe, fl_ctx)
         config_dict[ConfigKey.TOTAL_ROUNDS] = total_rounds
         config_dict[ConfigKey.SITE_NAME] = fl_ctx.get_identity_name()
         config_dict[ConfigKey.JOB_ID] = fl_ctx.get_job_id()
         client_config.to_json(config_file)
-
-    def get_external_pipe_args(self, fl_ctx: FLContext) -> dict:
-        args = {}
-        if isinstance(self._pipe, IPCPPipe):
-            args["site_name"] = fl_ctx.get_identity_name()
-            args["root_url"] = self._pipe.cell.core_cell.root_url
-            args["secure"] = self._pipe.cell.core_cell.secure
-            args["workspace_dir"] = fl_ctx.get_engine().get_workspace().get_root_dir()
-        elif isinstance(self._pipe, FilePipe):
-            args["root_path"] = self._pipe.root_path
-            args["mode"] = Mode.ACTIVE
-        return args

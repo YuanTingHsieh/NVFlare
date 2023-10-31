@@ -16,22 +16,22 @@ import os
 from typing import Dict, Optional, Union
 
 from nvflare.app_common.abstract.fl_model import FLModel
-from nvflare.app_common.abstract.metric_data import MetricData
 from nvflare.app_common.data_exchange.constants import ExchangeFormat
 from nvflare.app_common.data_exchange.data_exchanger import DataExchangeException, DataExchanger
 from nvflare.fuel.utils import fobs
 from nvflare.fuel.utils.import_utils import optional_import
 from nvflare.fuel.utils.pipe.file_pipe import FilePipe
 from nvflare.fuel.utils.pipe.ipc_apipe import IPCAPipe
+from nvflare.fuel.utils.pipe.pipe_handler import PipeHandler
 
 from .config import ClientConfig, ConfigKey, from_file
-from .constants import CONFIG_EXCHANGE
+from .constants import CONFIG_DATA_EXCHANGE
 from .model_registry import ModelRegistry
 
 PROCESS_MODEL_REGISTRY = None
 
 
-def init(config: Union[str, Dict] = f"config/{CONFIG_EXCHANGE}", rank: Optional[str] = None):
+def init(config: Union[str, Dict] = f"config/{CONFIG_DATA_EXCHANGE}", rank: Optional[str] = None):
     """Initializes NVFlare Client API environment.
 
     Args:
@@ -66,21 +66,24 @@ def init(config: Union[str, Dict] = f"config/{CONFIG_EXCHANGE}", rank: Optional[
                 else:
                     raise RuntimeError(f"Can't import TensorDecomposer for format: {ExchangeFormat.PYTORCH}")
 
-            # TODO: make Pipe configurable
             pipe_args = client_config.get_pipe_args()
             if client_config.get_pipe_class() == "FilePipe":
-                # pipe = FilePipe(Mode.PASSIVE, data_exchange_path)
                 pipe = FilePipe(**pipe_args)
             elif client_config.get_pipe_class() == "IPCAPipe":
-                # pipe = CellPipe(root_url=client_config.get_root_url(), mode=Mode.ACTIVE, parent_url=client_config.get_flare_site_url())
                 pipe = IPCAPipe(**pipe_args)
             else:
                 raise RuntimeError(f"Pipe class {client_config.get_pipe_class()} is not supported.")
 
+            pipe.open(client_config.get_pipe_name())
+            pipe_handler = PipeHandler(
+                pipe,
+                # read_interval=read_interval,
+                # heartbeat_interval=heartbeat_interval,
+                # heartbeat_timeout=heartbeat_timeout,
+            )
             dx = DataExchanger(
                 supported_topics=client_config.get_supported_topics(),
-                pipe=pipe,
-                pipe_name=client_config.get_pipe_name(),
+                pipe_handler=pipe_handler,
             )
 
         PROCESS_MODEL_REGISTRY = ModelRegistry(client_config, rank, dx)
@@ -115,12 +118,6 @@ def send(fl_model: FLModel, clear_registry: bool = True) -> None:
     model_registry.submit_model(model=fl_model)
     if clear_registry:
         clear()
-
-
-def log(metric_data: MetricData):
-    """Logs the value to NVFlare side."""
-    model_registry = _get_model_registry()
-    model_registry.submit_task(data=metric_data, meta={}, return_code="ok")
 
 
 def clear():

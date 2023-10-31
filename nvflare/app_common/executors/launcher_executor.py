@@ -26,10 +26,8 @@ from nvflare.apis.signal import Signal
 from nvflare.app_common.abstract.exchange_task import ExchangeTask
 from nvflare.app_common.abstract.fl_model import FLModel
 from nvflare.app_common.abstract.launcher import Launcher, LauncherCompleteStatus
-from nvflare.app_common.abstract.metric_data import MetricData
 from nvflare.app_common.app_constant import AppConstants
 from nvflare.app_common.utils.fl_model_utils import FLModelUtils, ParamsConverter
-from nvflare.app_common.widgets.streaming import AnalyticsSender
 from nvflare.fuel.utils.pipe.pipe import Message, Pipe
 from nvflare.fuel.utils.pipe.pipe_handler import PipeHandler, Topic
 from nvflare.fuel.utils.validation_utils import check_object_type
@@ -58,7 +56,6 @@ class LauncherExecutor(Executor):
         from_nvflare_converter_id: Optional[str] = None,
         to_nvflare_converter_id: Optional[str] = None,
         launch_once: bool = True,
-        analytic_sender_id: Optional[str] = None,
     ) -> None:
         """Initializes the LauncherExecutor.
 
@@ -86,7 +83,6 @@ class LauncherExecutor(Executor):
                 This converter will be called when model is sent from nvflare executor side to controller side.
             launch_once (bool): Whether to launch just once for the whole job (default: True). True means only the first task
                 will trigger `launcher.launch_task`. Which is efficient when the data setup is taking a lot of time.
-            analytic_sender_id  (Optional[str]): Identifier for obtaining the AnalyticsSender from NVFlare components.
         """
         super().__init__()
         self.launcher: Optional[Launcher] = None
@@ -127,14 +123,10 @@ class LauncherExecutor(Executor):
         self._to_nvflare_converter_id = to_nvflare_converter_id
         self._to_nvflare_converter: Optional[ParamsConverter] = None
 
-        self._analytic_sender = None
-        self._analytic_sender_id = analytic_sender_id
-
     def initialize(self, fl_ctx: FLContext) -> None:
         self._init_launcher(fl_ctx)
         self._init_converter(fl_ctx)
         self._init_pipe(fl_ctx)
-        self._init_analytic_sender(fl_ctx)
 
     def handle_event(self, event_type: str, fl_ctx: FLContext) -> None:
         if event_type == EventType.START_RUN:
@@ -250,13 +242,6 @@ class LauncherExecutor(Executor):
         if to_nvflare_converter is not None:
             check_object_type(self._to_nvflare_converter_id, to_nvflare_converter, ParamsConverter)
             self._to_nvflare_converter = to_nvflare_converter
-
-    def _init_analytic_sender(self, fl_ctx: FLContext) -> None:
-        engine = fl_ctx.get_engine()
-        analytic_sender: AnalyticsSender = engine.get_component(self._analytic_sender_id)
-        if analytic_sender is not None:
-            check_object_type(self._analytic_sender_id, analytic_sender, AnalyticsSender)
-            self._analytic_sender = analytic_sender
 
     def _launch(self, task_name: str, shareable: Shareable, fl_ctx: FLContext, abort_signal: Signal) -> bool:
         future = self._thread_pool_executor.submit(self._launch_task, task_name, shareable, fl_ctx, abort_signal)
@@ -386,18 +371,8 @@ class LauncherExecutor(Executor):
                         self._result_fl_model = reply.data.data
                     if reply.data.data.metrics is not None:
                         self._result_metrics = reply.data.data
-                elif isinstance(reply.data.data, MetricData):
-                    if self._analytic_sender:
-                        metric_data = reply.data.data
-                        self.log_info(fl_ctx, f"Add analytic: {metric_data}")
-                        self._analytic_sender.add(
-                            tag=metric_data.key,
-                            value=metric_data.value,
-                            data_type=metric_data.data_type,
-                            **metric_data.additional_args,
-                        )
                 else:
-                    self.log_error(fl_ctx, "reply.data.data is not of type FLModel or dict.")
+                    self.log_error(fl_ctx, "reply.data.data is not of type FLModel.")
                     return make_reply(ReturnCode.EXECUTION_EXCEPTION)
 
             if self._check_exchange_exit(task_name=task_name) == "":

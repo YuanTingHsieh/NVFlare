@@ -18,7 +18,7 @@ from typing import Any, List, Optional, Tuple
 
 from nvflare.apis.utils.decomposers import flare_decomposers
 from nvflare.app_common.decomposers import common_decomposers as app_common_decomposers
-from nvflare.fuel.utils.pipe.pipe import Message, Pipe
+from nvflare.fuel.utils.pipe.pipe import Message
 from nvflare.fuel.utils.pipe.pipe_handler import PipeHandler, Topic
 
 
@@ -46,24 +46,16 @@ class DataExchanger:
     def __init__(
         self,
         supported_topics: List[str],
-        pipe: Pipe,
-        pipe_name: str = "pipe",
+        pipe_handler: PipeHandler,
         get_poll_interval: float = 0.5,
-        read_interval: float = 0.1,
-        heartbeat_interval: float = 5.0,
-        heartbeat_timeout: float = 30.0,
     ):
         """Initializes the DataExchanger.
 
         Args:
             supported_topics (list[str]): Supported topics for data exchange. This allows the sender and receiver to identify
                 the purpose or content of the data being exchanged.
-            pipe (Pipe): The pipe used for data exchange.
-            pipe_name (str): Name of the pipe. Defaults to "pipe".
+            pipe_handler (PipeHandler): The PipeHandler used for data exchange.
             get_poll_interval (float): Interval for checking if the other side has sent data. Defaults to 0.5.
-            read_interval (float): Interval for reading from the pipe. Defaults to 0.1.
-            heartbeat_interval (float): Interval for sending heartbeat to the peer. Defaults to 5.0.
-            heartbeat_timeout (float): Timeout for waiting for a heartbeat from the peer. Defaults to 30.0.
         """
         self.logger = logging.getLogger(self.__class__.__name__)
         self._req_id: Optional[str] = None
@@ -72,13 +64,8 @@ class DataExchanger:
 
         flare_decomposers.register()
         app_common_decomposers.register()
-        pipe.open(pipe_name)
-        self.pipe_handler = PipeHandler(
-            pipe,
-            read_interval=read_interval,
-            heartbeat_interval=heartbeat_interval,
-            heartbeat_timeout=heartbeat_timeout,
-        )
+
+        self.pipe_handler = pipe_handler
         self.pipe_handler.start()
         self.pipe_handler.wait_for_other_end()
         self._get_poll_interval = get_poll_interval

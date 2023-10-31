@@ -14,7 +14,12 @@
 
 from typing import Dict
 
+from nvflare.apis.fl_context import FLContext
 from nvflare.app_common.data_exchange.constants import ExchangeFormat
+from nvflare.fuel.utils.constants import Mode
+from nvflare.fuel.utils.pipe.file_pipe import FilePipe
+from nvflare.fuel.utils.pipe.ipc_ppipe import IPCPPipe
+from nvflare.fuel.utils.pipe.pipe import Pipe
 
 
 def numerical_params_diff(original: Dict, new: Dict) -> Dict:
@@ -42,3 +47,24 @@ def numerical_params_diff(original: Dict, new: Dict) -> Dict:
 
 
 DIFF_FUNCS = {ExchangeFormat.PYTORCH: numerical_params_diff, ExchangeFormat.NUMPY: numerical_params_diff}
+
+
+def get_external_pipe_class(pipe: Pipe) -> str:
+    if isinstance(pipe, IPCPPipe):
+        return "IPCAPipe"
+    elif isinstance(pipe, FilePipe):
+        return "FilePipe"
+    return ""
+
+
+def get_external_pipe_args(pipe: Pipe, fl_ctx: FLContext) -> dict:
+    args = {}
+    if isinstance(pipe, IPCPPipe):
+        args["site_name"] = fl_ctx.get_identity_name()
+        args["root_url"] = pipe.cell.core_cell.root_url
+        args["secure"] = pipe.cell.core_cell.secure
+        args["workspace_dir"] = fl_ctx.get_engine().get_workspace().get_root_dir()
+    elif isinstance(pipe, FilePipe):
+        args["root_path"] = pipe.root_path
+        args["mode"] = Mode.ACTIVE
+    return args
