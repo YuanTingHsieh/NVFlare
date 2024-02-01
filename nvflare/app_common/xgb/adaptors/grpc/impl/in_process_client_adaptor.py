@@ -37,7 +37,7 @@ class InProcessGrpcClientAdaptor(GrpcClientAdaptor):
         verbose_eval=False,
         use_gpus=False,
         grpc_options=None,
-        req_timeout=10.0,
+        req_timeout=100.0,
         model_file_name="model.json",
     ):
         GrpcClientAdaptor.__init__(self, grpc_options, req_timeout)

@@ -114,7 +114,6 @@ class XGBController(Controller):
         # set up operation handlers
         self.op_table = {
             Constant.OP_ALL_GATHER: self._process_all_gather,
-            Constant.OP_ALL_GATHER_V: self._process_all_gather_v,
             Constant.OP_ALL_REDUCE: self._process_all_reduce,
             Constant.OP_BROADCAST: self._process_broadcast,
         }
@@ -239,24 +238,6 @@ class XGBController(Controller):
         reply[Constant.PARAM_KEY_RCV_BUF] = rcv_buf
         return reply
 
-    def _process_all_gather_v(self, request: Shareable, fl_ctx: FLContext) -> Shareable:
-        """This is the op handler for AllgatherV.
-
-        Args:
-            request: the request containing op params
-            fl_ctx: FL context
-
-        Returns: a Shareable containing operation result
-
-        """
-        rank = request.get(Constant.PARAM_KEY_RANK)
-        seq = request.get(Constant.PARAM_KEY_SEQ)
-        send_buf = request.get(Constant.PARAM_KEY_SEND_BUF)
-        rcv_buf = self.adaptor.all_gather_v(rank, seq, send_buf, fl_ctx)
-        reply = Shareable()
-        reply[Constant.PARAM_KEY_RCV_BUF] = rcv_buf
-        return reply
-
     def _process_all_reduce(self, request: Shareable, fl_ctx: FLContext) -> Shareable:
         """This is the op handler for Allreduce.
 
@@ -300,7 +281,7 @@ class XGBController(Controller):
 
     def _process_xgb_request(self, topic: str, request: Shareable, fl_ctx: FLContext) -> Shareable:
         if self._is_stopped():
-            self.log_error(fl_ctx, f"dropped XGB request since server is already stopped")
+            self.log_error(fl_ctx, "dropped XGB request since server is already stopped")
             return make_reply(ReturnCode.SERVICE_UNAVAILABLE)
 
         # since XGB protocol is very strict, we'll stop the control flow when any error occurs
@@ -502,7 +483,7 @@ class XGBController(Controller):
 
         # monitor client health
         # we periodically check job status until all clients are done or the system is stopped
-        self.log_info(fl_ctx, f"Waiting for clients to finish ...")
+        self.log_info(fl_ctx, "Waiting for clients to finish ...")
         while not self._is_stopped():
             done = self._check_job_status(fl_ctx)
             if done:

@@ -12,23 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import nvflare.app_common.xgb.adaptors.grpc.proto.federated_pb2 as pb2
+import nvflare.app_common.xgb.adaptors.grpc.proto.federated_pb2_grpc as pb2
 from nvflare.apis.fl_context import FLContext
 from nvflare.app_common.xgb.adaptor import XGBClientAdaptor
 from nvflare.app_common.xgb.adaptors.grpc.proto.federated_pb2_grpc import FederatedServicer
 from nvflare.app_common.xgb.adaptors.grpc.server import XGBServer
-from nvflare.fuel.f3.drivers.net_utils import get_open_tcp_port
+from nvflare.fuel.f3.drivers.net_utils import MAX_FRAME_SIZE, get_open_tcp_port
 from nvflare.security.logging import secure_format_exception
+
+GRPC_DEFAULT_OPTIONS = [
+    ("grpc.max_send_message_length", MAX_FRAME_SIZE),
+    ("grpc.max_receive_message_length", MAX_FRAME_SIZE),
+]
 
 
 class GrpcClientAdaptor(XGBClientAdaptor, FederatedServicer):
     def __init__(
         self,
         grpc_options=None,
-        req_timeout=10.0,
+        req_timeout=100.0,
     ):
         XGBClientAdaptor.__init__(self, req_timeout)
-        self.grpc_options = grpc_options
+        self.grpc_options = GRPC_DEFAULT_OPTIONS if grpc_options is None else grpc_options
         self.internal_xgb_server = None
         self.stopped = False
         self.internal_server_addr = None
@@ -55,11 +60,11 @@ class GrpcClientAdaptor(XGBClientAdaptor, FederatedServicer):
             raise RuntimeError("failed to get a port for XGB server")
         self.internal_server_addr = f"127.0.0.1:{port}"
         self.logger.info(f"Start internal server at {self.internal_server_addr}")
-        self.internal_xgb_server = XGBServer(self.internal_server_addr, 10, self.grpc_options, self)
+        self.internal_xgb_server = XGBServer(self.internal_server_addr, 20, self.grpc_options, self)
         self.internal_xgb_server.start(no_blocking=True)
         self.logger.info(f"Started internal server at {self.internal_server_addr}")
         self.start_client(self.internal_server_addr, port)
-        self.logger.info(f"Started external XGB Client")
+        self.logger.info("Started external XGB Client")
 
     def stop(self, fl_ctx: FLContext):
         if self.stopped:
@@ -84,6 +89,7 @@ class GrpcClientAdaptor(XGBClientAdaptor, FederatedServicer):
             self.system_panic(reason, fl_ctx)
 
     def Allgather(self, request: pb2.AllgatherRequest, context):
+        print("Allgather is called in client adaptor")
         try:
             rcv_buf = self._send_all_gather(
                 rank=request.rank,
@@ -95,19 +101,8 @@ class GrpcClientAdaptor(XGBClientAdaptor, FederatedServicer):
             self._abort(reason=f"send_all_gather exception: {secure_format_exception(ex)}")
             return None
 
-    def AllgatherV(self, request: pb2.AllgatherVRequest, context):
-        try:
-            rcv_buf = self._send_all_gather_v(
-                rank=request.rank,
-                seq=request.sequence_number,
-                send_buf=request.send_buffer,
-            )
-            return pb2.AllgatherVReply(receive_buffer=rcv_buf)
-        except Exception as ex:
-            self._abort(reason=f"send_all_gather_v exception: {secure_format_exception(ex)}")
-            return None
-
     def Allreduce(self, request: pb2.AllreduceRequest, context):
+        print("Allreduce is called in client adaptor")
         try:
             rcv_buf = self._send_all_reduce(
                 rank=request.rank,

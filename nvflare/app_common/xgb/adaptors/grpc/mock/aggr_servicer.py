@@ -14,7 +14,7 @@
 
 import threading
 
-import nvflare.app_common.xgb.adaptors.grpc.proto.federated_pb2 as pb2
+import nvflare.app_common.xgb.adaptors.grpc.proto.federated_pb2_grpc as pb2
 from nvflare.app_common.xgb.adaptors.grpc.proto.federated_pb2_grpc import FederatedServicer
 from nvflare.fuel.utils.obj_utils import get_logger
 
@@ -91,14 +91,6 @@ class AggrServicer(FederatedServicer):
         rank = request.rank
         data = request.send_buffer
         op = "Allgather"
-        self.logger.info(f"got {op}: {seq=} {rank=} data_size={len(data)}")
-        return self._wait_for_result(op, rank, seq, request)
-
-    def AllgatherV(self, request: pb2.AllgatherVRequest, context):
-        seq = request.sequence_number
-        rank = request.rank
-        data = request.send_buffer
-        op = "AllgatherV"
         self.logger.info(f"got {op}: {seq=} {rank=} data_size={len(data)}")
         return self._wait_for_result(op, rank, seq, request)
 

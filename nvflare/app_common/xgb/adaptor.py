@@ -199,21 +199,6 @@ class XGBServerAdaptor(XGBAdaptor):
         pass
 
     @abstractmethod
-    def all_gather_v(self, rank: int, seq: int, send_buf: bytes, fl_ctx: FLContext) -> bytes:
-        """Called by the XGB Controller to perform AllgatherV operation, per XGBoost spec.
-
-        Args:
-            rank: rank of the calling client
-            seq: sequence number of the request
-            send_buf: input data
-            fl_ctx: FL context
-
-        Returns: operation result
-
-        """
-        pass
-
-    @abstractmethod
     def all_reduce(
         self,
         rank: int,
@@ -338,6 +323,7 @@ class XGBClientAdaptor(XGBAdaptor):
         Returns: operation result
 
         """
+        print(f"_send_request to server is called in adaptor with {op=}")
         reply = self.sender.send_to_server(op, req, self.abort_signal)
         if isinstance(reply, Shareable):
             rcv_buf = reply.get(Constant.PARAM_KEY_RCV_BUF)
@@ -363,23 +349,6 @@ class XGBClientAdaptor(XGBAdaptor):
         req[Constant.PARAM_KEY_SEQ] = seq
         req[Constant.PARAM_KEY_SEND_BUF] = send_buf
         return self._send_request(Constant.OP_ALL_GATHER, req)
-
-    def _send_all_gather_v(self, rank: int, seq: int, send_buf: bytes) -> bytes:
-        """This method is called by a concrete client adaptor to send AllgatherV operation to the server.
-
-        Args:
-            rank: rank of the client
-            seq: sequence number of the request
-            send_buf: operation input
-
-        Returns: operation result
-
-        """
-        req = Shareable()
-        req[Constant.PARAM_KEY_RANK] = rank
-        req[Constant.PARAM_KEY_SEQ] = seq
-        req[Constant.PARAM_KEY_SEND_BUF] = send_buf
-        return self._send_request(Constant.OP_ALL_GATHER_V, req)
 
     def _send_all_reduce(self, rank: int, seq: int, data_type: int, reduce_op: int, send_buf: bytes) -> bytes:
         """This method is called by a concrete client adaptor to send Allreduce operation to the server.

@@ -49,16 +49,14 @@ class Constant:
 
     # XGB operation names
     OP_ALL_GATHER = "all_gather"
-    OP_ALL_GATHER_V = "all_gather_v"
     OP_ALL_REDUCE = "all_reduce"
     OP_BROADCAST = "broadcast"
 
     # XGB operation codes
     OPCODE_NONE = 0
     OPCODE_ALL_GATHER = 1
-    OPCODE_ALL_GATHER_V = 2
-    OPCODE_ALL_REDUCE = 3
-    OPCODE_BROADCAST = 4
+    OPCODE_ALL_REDUCE = 2
+    OPCODE_BROADCAST = 3
     OPCODE_DONE = 99
 
     # XGB operation error codes

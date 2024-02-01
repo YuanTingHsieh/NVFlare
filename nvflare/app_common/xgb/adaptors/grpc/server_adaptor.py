@@ -11,12 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import nvflare.app_common.xgb.adaptors.grpc.proto.federated_pb2 as pb2
+import nvflare.app_common.xgb.adaptors.grpc.proto.federated_pb2_grpc as pb2
 from nvflare.apis.fl_context import FLContext
 from nvflare.app_common.xgb.adaptor import XGBServerAdaptor
 from nvflare.app_common.xgb.adaptors.grpc.client import XGBClient
 from nvflare.app_common.xgb.defs import Constant
-from nvflare.fuel.f3.drivers.net_utils import get_open_tcp_port
+from nvflare.fuel.f3.drivers.net_utils import MAX_FRAME_SIZE, get_open_tcp_port
+
+GRPC_DEFAULT_OPTIONS = [
+    ("grpc.max_send_message_length", MAX_FRAME_SIZE),
+    ("grpc.max_receive_message_length", MAX_FRAME_SIZE),
+]
 
 
 class GrpcServerAdaptor(XGBServerAdaptor):
@@ -47,8 +52,11 @@ class GrpcServerAdaptor(XGBServerAdaptor):
         server_addr = f"127.0.0.1:{port}"
         self.start_server(server_addr, port, self.world_size)
 
+        self.logger.info(f"Start xgb server at {server_addr}")
+        self.logger.info(f"Start XGBClient at {server_addr}")
+
         # start XGB client
-        self.internal_xgb_client = XGBClient(server_addr)
+        self.internal_xgb_client = XGBClient(server_addr, grpc_options=GRPC_DEFAULT_OPTIONS)
         self.internal_xgb_client.start(ready_timeout=self.xgb_server_ready_timeout)
 
     def stop(self, fl_ctx: FLContext):
@@ -69,14 +77,6 @@ class GrpcServerAdaptor(XGBServerAdaptor):
             return result.receive_buffer
         else:
             raise RuntimeError(f"bad result from XGB server: expect AllgatherReply but got {type(result)}")
-
-    def all_gather_v(self, rank: int, seq: int, send_buf: bytes, fl_ctx: FLContext) -> bytes:
-        assert isinstance(self.internal_xgb_client, XGBClient)
-        result = self.internal_xgb_client.send_allgatherv(seq_num=seq, rank=rank, data=send_buf)
-        if isinstance(result, pb2.AllgatherVReply):
-            return result.receive_buffer
-        else:
-            raise RuntimeError(f"bad result from XGB server: expect AllgatherVReply but got {type(result)}")
 
     def all_reduce(
         self,

@@ -1,7 +1,6 @@
 import os
 
 import xgboost as xgb
-from xgboost import callback
 
 
 class TensorBoardCallback(xgb.callback.TrainingCallback):

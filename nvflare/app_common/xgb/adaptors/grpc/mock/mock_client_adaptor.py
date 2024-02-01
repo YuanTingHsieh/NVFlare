@@ -64,18 +64,6 @@ class MockClientAdaptor(GrpcClientAdaptor):
             else:
                 self.logger.info("OK: allgather result matches request!")
 
-            self.logger.info("sending allgatherV")
-            start = time.time()
-            result = client.send_allgatherv(seq_num=seq + 2, rank=rank, data=data)
-            total_reqs += 1
-            total_time += time.time() - start
-            if not isinstance(result, pb2.AllgatherVReply):
-                self.logger.error(f"expect reply to be pb2.AllgatherVReply but got {type(result)}")
-            elif result.receive_buffer != data:
-                self.logger.error("allgatherV result does not match request")
-            else:
-                self.logger.info("OK: allgatherV result matches request!")
-
             self.logger.info("sending allreduce")
             start = time.time()
             result = client.send_allreduce(

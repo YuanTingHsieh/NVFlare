@@ -50,18 +50,6 @@ def main():
         else:
             print("OK: allgather result matches request!")
 
-        print("sending allgatherV")
-        start = time.time()
-        result = client.send_allgatherv(seq_num=seq + 2, rank=rank, data=data)
-        total_reqs += 1
-        total_time += time.time() - start
-        if not isinstance(result, pb2.AllgatherVReply):
-            print(f"expect reply to be pb2.AllgatherVReply but got {type(result)}")
-        elif result.receive_buffer != data:
-            print("ERROR: allgatherV result does not match request")
-        else:
-            print("OK: allgatherV result matches request!")
-
         print("sending allreduce")
         start = time.time()
         result = client.send_allreduce(
