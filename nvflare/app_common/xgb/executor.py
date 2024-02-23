@@ -32,7 +32,7 @@ class XGBExecutor(Executor):
         adaptor_component_id: str,
         configure_task_name=Constant.CONFIG_TASK_NAME,
         start_task_name=Constant.START_TASK_NAME,
-        req_timeout=10.0,
+        req_timeout=100.0,
     ):
         """Constructor
 
@@ -62,6 +62,7 @@ class XGBExecutor(Executor):
         Returns: a XGBClientAdaptor object
 
         """
+        self.logger.info("Calling get_adaptor XGBExecutor")
         engine = fl_ctx.get_engine()
         return engine.get_component(self.adaptor_component_id)
 

@@ -1,0 +1,16 @@
+{
+  "format_version": 2,
+  "task_data_filters": [],
+  "task_result_filters": [],
+  "components": [
+  ],
+  "workflows": [
+    {
+      "id": "xgb_ctl",
+      "path": "nvflare.app_common.xgb.fed_controller.XGBFedController",
+      "args": {
+        "num_rounds": 5
+      }
+    }
+  ]
+}

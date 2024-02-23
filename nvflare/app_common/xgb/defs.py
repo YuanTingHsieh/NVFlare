@@ -34,7 +34,7 @@ class Constant:
 
     TASK_CHECK_INTERVAL = 0.5
     JOB_STATUS_CHECK_INTERVAL = 2.0
-    MAX_CLIENT_OP_INTERVAL = 90.0
+    MAX_CLIENT_OP_INTERVAL = 900.0
     WORKFLOW_PROGRESS_TIMEOUT = 3600.0
 
     # message topics
@@ -84,7 +84,6 @@ class Constant:
     RUNNER_CTX_NUM_ROUNDS = "num_rounds"
     RUNNER_CTX_WORLD_SIZE = "world_size"
     RUNNER_CTX_RANK = "rank"
-    RUNNER_CTX_DATA_LOADER = "data_loader"
     RUNNER_CTX_TB_DIR = "tb_dir"
     RUNNER_CTX_MODEL_DIR = "model_dir"
 

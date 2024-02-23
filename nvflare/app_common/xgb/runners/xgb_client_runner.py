@@ -57,12 +57,13 @@ class XGBClientRunner(XGBRunner, FLComponent):
         self._stopped = False
 
     def initialize(self, fl_ctx: FLContext):
+        self.logger.info("XXXXXXXXXXXXXXXXXX Calling XGBClientRunner initialize XXXXXXXXXXXXXXXXX")
         engine = fl_ctx.get_engine()
         self._data_loader = engine.get_component(self.data_loader_id)
         if not isinstance(self._data_loader, XGBDataLoader):
             self.system_panic(f"data_loader should be type XGBDataLoader but got {type(self._data_loader)}", fl_ctx)
 
-    def _xgb_train(self, params: XGBoostParams, train_data, val_data) -> xgb.core.Booster:
+    def xgb_train(self, params: XGBoostParams, train_data, val_data) -> xgb.core.Booster:
         """XGBoost training logic.
 
         Args:
@@ -92,12 +93,12 @@ class XGBClientRunner(XGBRunner, FLComponent):
         return bst
 
     def run(self, ctx: dict):
+        self.logger.info("XXXXXXXXXXXXXXXXXX Calling XGBClientRunner run XXXXXXXXXXXXXXXXX")
         self._client_name = ctx.get(Constant.RUNNER_CTX_CLIENT_NAME)
         self._rank = ctx.get(Constant.RUNNER_CTX_RANK)
         self._world_size = ctx.get(Constant.RUNNER_CTX_WORLD_SIZE)
         self._num_rounds = ctx.get(Constant.RUNNER_CTX_NUM_ROUNDS)
         self._server_addr = ctx.get(Constant.RUNNER_CTX_SERVER_ADDR)
-        self._data_loader = ctx.get(Constant.RUNNER_CTX_DATA_LOADER)
         self._tb_dir = ctx.get(Constant.RUNNER_CTX_TB_DIR)
         self._model_dir = ctx.get(Constant.RUNNER_CTX_MODEL_DIR)
 
@@ -121,11 +122,11 @@ class XGBClientRunner(XGBRunner, FLComponent):
             "federated_world_size": self._world_size,
             "federated_rank": self._rank,
         }
+        self.logger.info(f"communicator_env is {communicator_env=}")
         with xgb.collective.CommunicatorContext(**communicator_env):
-            # Load the data. Dmatrix must be created with column split mode in CommunicatorContext for vertical FL
             train_data, val_data = self._data_loader.load_data(self._client_name)
 
-            bst = self._xgb_train(params, train_data, val_data)
+            bst = self.xgb_train(params, train_data, val_data)
 
             # Save the model.
             bst.save_model(os.path.join(self._model_dir, self.model_file_name))

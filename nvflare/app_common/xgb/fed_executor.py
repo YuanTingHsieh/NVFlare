@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+import logging
+
 from nvflare.apis.fl_context import FLContext
 from nvflare.app_common.xgb.adaptors.grpc_client_adaptor import GrpcClientAdaptor
 from nvflare.app_common.xgb.runners.xgb_client_runner import XGBClientRunner
@@ -27,7 +30,7 @@ class FedXGBHistogramExecutor(XGBExecutor):
         verbose_eval=False,
         use_gpus=False,
         int_server_grpc_options=None,
-        req_timeout=10.0,
+        req_timeout=100.0,
         model_file_name="model.json",
         in_process=True,
     ):
@@ -36,6 +39,7 @@ class FedXGBHistogramExecutor(XGBExecutor):
             adaptor_component_id="",
             req_timeout=req_timeout,
         )
+        logging.basicConfig(level=logging.DEBUG)
         self.early_stopping_rounds = early_stopping_rounds
         self.xgb_params = xgb_params
         self.data_loader_id = data_loader_id
@@ -46,6 +50,7 @@ class FedXGBHistogramExecutor(XGBExecutor):
         self.in_process = in_process
 
     def get_adaptor(self, fl_ctx: FLContext):
+        self.logger.info("Calling get_adaptor FedXGBHistogramExecutor")
         runner = XGBClientRunner(
             data_loader_id=self.data_loader_id,
             early_stopping_rounds=self.early_stopping_rounds,

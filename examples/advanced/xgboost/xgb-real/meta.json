@@ -1,0 +1,12 @@
+{
+  "name": "xgb-real",
+  "resource_spec": {},
+  "deploy_map": {
+    "app": [
+      "server",
+      "site-1",
+      "site-2"
+    ]
+  },
+  "min_clients" : 2
+}

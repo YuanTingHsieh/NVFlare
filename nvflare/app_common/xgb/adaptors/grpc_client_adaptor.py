@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import multiprocessing
+import sys
 import threading
 
 import nvflare.app_common.xgb.proto.federated_pb2 as pb2
 from nvflare.apis.fl_constant import FLContextKey
 from nvflare.apis.fl_context import FLContext
 from nvflare.app_common.xgb.adaptors.adaptor import XGBClientAdaptor
-from nvflare.app_common.xgb.defs import Constant
+from nvflare.app_common.xgb.defs import Constant, GRPC_DEFAULT_OPTIONS
 from nvflare.app_common.xgb.grpc_server import GrpcServer
 from nvflare.app_common.xgb.proto.federated_pb2_grpc import FederatedServicer
 from nvflare.fuel.f3.drivers.net_utils import get_open_tcp_port
@@ -59,10 +60,10 @@ class GrpcClientAdaptor(XGBClientAdaptor, FederatedServicer):
     def __init__(
         self,
         int_server_grpc_options=None,
-        in_process=True,
+        in_process=False,
     ):
         XGBClientAdaptor.__init__(self)
-        self.int_server_grpc_options = int_server_grpc_options
+        self.int_server_grpc_options = GRPC_DEFAULT_OPTIONS if int_server_grpc_options is None else int_server_grpc_options
         self.in_process = in_process
         self.internal_xgb_server = None
         self.stopped = False
@@ -174,7 +175,7 @@ class GrpcClientAdaptor(XGBClientAdaptor, FederatedServicer):
         port = get_open_tcp_port(resources={})
         if not port:
             raise RuntimeError("failed to get a port for XGB server")
-        self.internal_server_addr = f"127.0.0.1:{port}"
+        self.internal_server_addr = f"localhost:{port}"
         self.logger.info(f"Start internal server at {self.internal_server_addr}")
         self.internal_xgb_server = GrpcServer(self.internal_server_addr, 10, self.int_server_grpc_options, self)
         self.internal_xgb_server.start(no_blocking=True)
@@ -203,6 +204,7 @@ class GrpcClientAdaptor(XGBClientAdaptor, FederatedServicer):
 
     def Allgather(self, request: pb2.AllgatherRequest, context):
         try:
+            self.logger.info(f"Calling Allgather with {sys.getsizeof(request.send_buffer)}")
             rcv_buf = self._send_all_gather(
                 rank=request.rank,
                 seq=request.sequence_number,
@@ -215,6 +217,7 @@ class GrpcClientAdaptor(XGBClientAdaptor, FederatedServicer):
 
     def AllgatherV(self, request: pb2.AllgatherVRequest, context):
         try:
+            self.logger.info(f"Calling AllgatherV with {sys.getsizeof(request.send_buffer)}")
             rcv_buf = self._send_all_gather_v(
                 rank=request.rank,
                 seq=request.sequence_number,
@@ -227,6 +230,7 @@ class GrpcClientAdaptor(XGBClientAdaptor, FederatedServicer):
 
     def Allreduce(self, request: pb2.AllreduceRequest, context):
         try:
+            self.logger.info(f"Calling Allreduce with {sys.getsizeof(request.send_buffer)}")
             rcv_buf = self._send_all_reduce(
                 rank=request.rank,
                 seq=request.sequence_number,
@@ -241,6 +245,7 @@ class GrpcClientAdaptor(XGBClientAdaptor, FederatedServicer):
 
     def Broadcast(self, request: pb2.BroadcastRequest, context):
         try:
+            self.logger.info(f"Calling Broadcast with {sys.getsizeof(request.send_buffer)}")
             rcv_buf = self._send_broadcast(
                 rank=request.rank,
                 seq=request.sequence_number,
