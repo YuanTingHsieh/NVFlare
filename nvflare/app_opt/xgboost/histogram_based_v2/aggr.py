@@ -24,7 +24,7 @@ class Aggregator:
         bin_id = sample_bin_assignment[sample_id]
         sample_value = gh_values[sample_id]
         current_value = aggr[bin_id]
-        if current_value == 0:
+        if isinstance(current_value, int) and current_value == 0:
             # avoid add since sample_value may be cypher-text!
             aggr[bin_id] = sample_value
         else:
