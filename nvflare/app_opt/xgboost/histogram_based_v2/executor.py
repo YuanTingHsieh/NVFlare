@@ -32,7 +32,7 @@ class XGBExecutor(Executor):
         adaptor_component_id: str,
         configure_task_name=Constant.CONFIG_TASK_NAME,
         start_task_name=Constant.START_TASK_NAME,
-        req_timeout=60.0,
+        req_timeout=600.0,
     ):
         """Constructor
 
