@@ -20,10 +20,10 @@ from nvflare.apis.fl_context import FLContext
 from nvflare.apis.shareable import Shareable
 from nvflare.app_opt.xgboost.histogram_based_v2.aggr import Aggregator
 from nvflare.app_opt.xgboost.histogram_based_v2.defs import Constant
-from nvflare.app_opt.xgboost.histogram_based_v2.mock_he.adder import Adder
-from nvflare.app_opt.xgboost.histogram_based_v2.mock_he.decrypter import Decrypter
-from nvflare.app_opt.xgboost.histogram_based_v2.mock_he.encryptor import Encryptor
-from nvflare.app_opt.xgboost.histogram_based_v2.mock_he.util import (
+from nvflare.app_opt.xgboost.histogram_based_v2.partial_he.adder import Adder
+from nvflare.app_opt.xgboost.histogram_based_v2.partial_he.decrypter import Decrypter
+from nvflare.app_opt.xgboost.histogram_based_v2.partial_he.encryptor import Encryptor
+from nvflare.app_opt.xgboost.histogram_based_v2.partial_he.util import (
     combine,
     decode_encrypted_data,
     decode_feature_aggregations,

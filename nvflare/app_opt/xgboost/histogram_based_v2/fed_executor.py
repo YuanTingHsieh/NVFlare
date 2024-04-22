@@ -27,7 +27,7 @@ class FedXGBHistogramExecutor(XGBExecutor):
         verbose_eval=False,
         use_gpus=False,
         int_server_grpc_options=None,
-        req_timeout=60.0,
+        req_timeout=600.0,
         model_file_name="model.json",
         metrics_writer_id: str = None,
         in_process=True,
