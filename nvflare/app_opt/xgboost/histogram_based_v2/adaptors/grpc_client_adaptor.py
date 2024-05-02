@@ -46,6 +46,7 @@ class GrpcClientAdaptor(XGBClientAdaptor, FederatedServicer):
         self._app_dir = None
         self._workspace = None
         self._run_dir = None
+        self._lock = threading.Lock()
         self._pending_req = {}
 
     def initialize(self, fl_ctx: FLContext):
@@ -214,23 +215,26 @@ class GrpcClientAdaptor(XGBClientAdaptor, FederatedServicer):
             return pb2.BroadcastReply(receive_buffer=None)
 
     def _check_duplicate_seq(self, op: str, rank: int, seq: int):
-        event = self._pending_req.get((rank, seq), None)
+        with self._lock:
+            event = self._pending_req.get((rank, seq), None)
         if event:
             self.logger.info(f"Duplicate seq {op=} {rank=} {seq=}, wait till original req is done")
             event.wait(DUPLICATE_REQ_MAX_HOLD_TIME)
-            time.sleep(1)
+            time.sleep(1) # To ensure the first request is returned first
             self.logger.info(f"Duplicate seq {op=} {rank=} {seq=} returned with empty buffer")
             return True
 
-        self._pending_req[(rank, seq)] = threading.Event()
+        with self._lock:
+            self._pending_req[(rank, seq)] = threading.Event()
         return False
 
     def _finish_pending_req(self, op: str, rank: int, seq: int):
-        event = self._pending_req.get((rank, seq), None)
-        if not event:
-            self.logger.error(f"No pending req {op=} {rank=} {seq=}")
-            return
+        with self._lock:
+            event = self._pending_req.get((rank, seq), None)
+            if not event:
+                self.logger.error(f"No pending req {op=} {rank=} {seq=}")
+                return
 
-        event.set()
-        del self._pending_req[(rank, seq)]
-        self.logger.info(f"Request seq {op=} {rank=} {seq=} finished processing")
+            event.set()
+            del self._pending_req[(rank, seq)]
+            self.logger.info(f"Request seq {op=} {rank=} {seq=} finished processing")
