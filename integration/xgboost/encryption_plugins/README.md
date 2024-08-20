@@ -1,9 +1,6 @@
-# Build Instruction
+# XGBoost Encrpytion plugin
 
-cd NVFlare/integration/xgboost/encryption_plugins
-mkdir build
-cd build
-cmake ..
-make
+This directory contains two implementation of XGBoost encryption plugin:
 
-The library is libxgb_nvflare.so 
+  - nvflare_plugin: The plugin that expects NVFlare python side to do encryption.
+  - cuda_plugin: The plugin that does paillier encryption using CUDA.
