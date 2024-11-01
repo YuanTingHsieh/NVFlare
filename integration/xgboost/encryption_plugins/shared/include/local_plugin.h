@@ -27,7 +27,7 @@ protected:
   std::vector<uint8_t> encrypted_gh_;
   std::vector<double> histo_;
   std::vector<uint32_t> cuts_;
-  std::vector<int32_t> slots_;
+  std::vector<int32_t> bin_idx_vec_;
   std::vector<uint8_t> buffer_;
 
 public:
@@ -96,9 +96,30 @@ public:
 
 private:
 
+  /**
+   * @brief Build histograms in encrypted space for vertical training
+   *
+   * @param ridx Pointer to a matrix of row IDs for each node
+   * @param sizes An array of sizes of each node
+   * @param nidx An array for each node ID
+   * @param len Number of nodes
+   * @param out_hist Pointer to encrypted histogram buffer
+   * @param out_len Buffer size
+   */
   void BuildEncryptedHistVertActive(const std::uint64_t **ridx, const std::size_t *sizes, const std::int32_t *nidx,
                                     std::size_t len, std::uint8_t **out_hist, std::size_t *out_len);
 
+
+  /**
+   * @brief Build histograms in encrypted space for vertical training
+   *
+   * @param ridx Pointer to a matrix of row IDs for each node
+   * @param sizes An array of sizes of each node
+   * @param nidx An array for each node ID
+   * @param len Number of nodes
+   * @param out_hist Pointer to encrypted histogram buffer
+   * @param out_len Buffer size
+   */
   void BuildEncryptedHistVertPassive(const std::uint64_t **ridx, const std::size_t *sizes, const std::int32_t *nidx,
                                      std::size_t len, std::uint8_t **out_hist, std::size_t *out_len);
 

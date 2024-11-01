@@ -21,12 +21,35 @@
 #include <iostream>
 #include <vector>
 #include <map>
+#include <chrono>
 #include "paillier.h"
 #include "base_plugin.h"
 #include "local_plugin.h"
 #include "endec.h"
 
-#define PRECISION 1e6
+#define PRECISION 1e9
+#define TIME
+
+class Timer {
+public:
+    Timer() : start_time_(), end_time_() {}
+
+    void start() {
+        start_time_ = std::chrono::high_resolution_clock::now();
+    }
+
+    void stop() {
+        end_time_ = std::chrono::high_resolution_clock::now();
+    }
+
+    double duration() const {
+        return std::chrono::duration_cast<std::chrono::microseconds>(end_time_ - start_time_).count();
+    }
+
+private:
+    std::chrono::high_resolution_clock::time_point start_time_;
+    std::chrono::high_resolution_clock::time_point end_time_;
+};
 
 namespace nvflare {
 
@@ -111,6 +134,7 @@ class CUDAPlugin: public LocalPlugin {
         cudaFree(encrypted_gh_pairs_);
         encrypted_gh_pairs_ = nullptr;
       }
+      if (debug_) std::cout << "clearGHPairs is finished" << std::endl;
     }
 
     Buffer createBuffer(
@@ -162,7 +186,7 @@ class CUDAPlugin: public LocalPlugin {
       if (endec_ptr_ != nullptr) {
         delete endec_ptr_;
       }
-      endec_ptr_ = new Endec(PRECISION);
+      endec_ptr_ = new Endec(PRECISION, debug_);
 
       size_t count = cleartext.size();
       int byte_length = bits / 8;
@@ -257,7 +281,6 @@ class CUDAPlugin: public LocalPlugin {
 
       paillier_cipher_ptr_->decrypt<TPI,TPB>(d_ciphers_ptr, d_plains_ptr, count);
 
-
       cudaMemcpy(h_ptr, d_plains_ptr, mem_size, cudaMemcpyDeviceToHost);
       std::vector<double> result;
       for (size_t i = 0; i < count; ++i) {
@@ -283,41 +306,42 @@ class CUDAPlugin: public LocalPlugin {
 
       CgbnPair* d_res_ptr;
       size_t mem_size = sizeof(CgbnPair);
-      if (mem_size != 2*sizeof(cgbn_mem_t<bits>)) {
+      if (mem_size != 2 * sizeof(cgbn_mem_t<bits>)) {
         std::cout << "Fatal Error" << std::endl;
       }
       ck(cudaMalloc((void **)&d_res_ptr, mem_size));
-      cgbn_mem_t<bits>* d_plains_ptr;
-      ck(cudaMalloc((void **)&d_plains_ptr, mem_size));
 
       if (!paillier_cipher_ptr_->has_pub_key) {
         std::cout << "Can't call AddGHPairs if paillier does not have public key." << std::endl;
         throw std::runtime_error("Can't call AddGHPairs if paillier does not have public key.");
       }
 
+      Timer timer;
       // Iterate through the map
       for (auto& pair : sample_ids) {
-          int key = pair.first;
-          const int* sample_id = pair.second.data();
-          int count = pair.second.size();
+        int key = pair.first;
+        const int* sample_id = pair.second.data();
+        int count = pair.second.size();
 
-          int* sample_id_d;
-          ck(cudaMalloc((void **)&sample_id_d, sizeof(int) * count));
-          cudaMemcpy(sample_id_d, sample_id, sizeof(int) * count, cudaMemcpyHostToDevice);
+        int* sample_id_d;
+        ck(cudaMalloc((void **)&sample_id_d, sizeof(int) * count));
+        cudaMemcpy(sample_id_d, sample_id, sizeof(int) * count, cudaMemcpyHostToDevice);
 
-          paillier_cipher_ptr_->sum<TPI,TPB>(d_res_ptr, encrypted_gh_pairs_, sample_id_d, count);
+        timer.start();
+        paillier_cipher_ptr_->sum<TPI,TPB>(d_res_ptr, encrypted_gh_pairs_, sample_id_d, count);
+        timer.stop();
+        std::cout << "Time for add " << count << " of elements is " << timer.duration() << " US" << std::endl;
 
-          void* data = malloc(mem_size);
-          cudaMemcpy(data, d_res_ptr, mem_size, cudaMemcpyDeviceToHost);
-          Buffer buffer(data, mem_size, true);
-          result[key] = buffer; // Add the Buffer object to the result map
-          cudaFree(sample_id_d);
+        void* data = malloc(mem_size);
+        cudaMemcpy(data, d_res_ptr, mem_size, cudaMemcpyDeviceToHost);
+        Buffer buffer(data, mem_size, true);
+        result[key] = buffer; // Add the Buffer object to the result map
+        cudaFree(sample_id_d);
       }
       cudaFree(d_res_ptr);
-      cudaFree(d_plains_ptr);
       if (debug_) std::cout << "Finish AddGHPairs" << std::endl;
       if (encrypted_gh_pairs_) {
-          clearGHPairs();
+        clearGHPairs();
       }
       return result;
     }

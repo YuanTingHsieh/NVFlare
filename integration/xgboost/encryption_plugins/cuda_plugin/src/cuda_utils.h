@@ -45,6 +45,8 @@ const static unsigned int key_len=1024;
 //const static unsigned int bits=6144;
 //const static unsigned int key_len=3072;
 
+#define DEBUG
+#define TIME
 
 const static int TPB=512;
 const static int TPI=32;

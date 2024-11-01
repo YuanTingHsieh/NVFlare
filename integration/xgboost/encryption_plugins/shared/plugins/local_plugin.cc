@@ -84,8 +84,9 @@ void LocalPlugin::ResetHistContext(const std::uint32_t *cutptrs, std::size_t cut
               << n_idx << std::endl;
   }
 
+  // TODO just use pointers directly
   cuts_ = std::vector<uint32_t>(cutptrs, cutptrs + cutptr_len);
-  slots_ = std::vector<int32_t>(bin_idx, bin_idx + n_idx);
+  bin_idx_vec_ = std::vector<int32_t>(bin_idx, bin_idx + n_idx);
 }
 
 void LocalPlugin::BuildEncryptedHistHori(const double *in_histogram, std::size_t len, std::uint8_t **out_hist,
@@ -172,7 +173,7 @@ void LocalPlugin::BuildEncryptedHistVert(const std::uint64_t **ridx, const std::
   }
 }
 
-void LocalPlugin::BuildEncryptedHistVertActive(const std::uint64_t **ridx, const std::size_t *sizes, const std::int32_t *,
+void LocalPlugin::BuildEncryptedHistVertActive(const std::uint64_t **ridx, const std::size_t *sizes, const std::int32_t *nidx,
                                                std::size_t len, std::uint8_t **out_hist, std::size_t *out_len) {
 
   if (debug_) {
@@ -191,14 +192,14 @@ void LocalPlugin::BuildEncryptedHistVertActive(const std::uint64_t **ridx, const
       auto row_id = ridx[i][j];
       auto num = cuts_.size() - 1;
       for (std::size_t f = 0; f < num; f++) {
-        int slot = slots_[f + num * row_id];
-        if ((slot < 0) || (slot >= total_bin_size)) {
+        int bin_idx = bin_idx_vec_[f + num * row_id];
+        if ((bin_idx < 0) || (bin_idx >= total_bin_size)) {
           continue;
         }
         auto g = gh_pairs_[row_id * 2];
         auto h = gh_pairs_[row_id * 2 + 1];
-        (histo_)[start + slot * 2] += g;
-        (histo_)[start + slot * 2 + 1] += h;
+        (histo_)[start + bin_idx * 2] += g;
+        (histo_)[start + bin_idx * 2 + 1] += h;
       }
     }
     start += histo_size;
@@ -216,34 +217,37 @@ void LocalPlugin::BuildEncryptedHistVertActive(const std::uint64_t **ridx, const
   *out_len = size;
 }
 
-void LocalPlugin::BuildEncryptedHistVertPassive(const std::uint64_t **ridx, const std::size_t *sizes, const std::int32_t *,
+void LocalPlugin::BuildEncryptedHistVertPassive(const std::uint64_t **ridx, const std::size_t *sizes, const std::int32_t *nidx,
                                                 std::size_t len, std::uint8_t **out_hist, std::size_t *out_len) {
   if (debug_) {
     std::cout << Ident() << " LocalPlugin::BuildEncryptedHistVertPassive called with " << len << " nodes" << std::endl;
   }
 
-  auto num_slot = cuts_.back();
-  auto total_size = num_slot * len;
+  auto total_bin_size = cuts_.back();
+  auto total_size = total_bin_size * len;
 
   auto encrypted_histo = std::vector<Buffer>(total_size);
   size_t offset = 0;
-  for (std::size_t i = 0; i < len; i++) {
-    auto num = cuts_.size() - 1;
+  for (std::size_t node_id = 0; node_id < len; node_id++) {
+    auto num_feature = cuts_.size() - 1;
     auto row_id_map = std::map<int, std::vector<int>>();
 
-    // Empty slot leaks data so fill everything with empty vectors
-    for (int slot = 0; slot < num_slot; slot++) {
-      row_id_map.insert({slot, std::vector<int>()});
+    // Empty bin_idx leaks data so fill everything with empty vectors
+    for (int bin_idx = 0; bin_idx < total_bin_size; bin_idx++) {
+      row_id_map.insert({bin_idx, std::vector<int>()});
     }
 
-    for (std::size_t f = 0; f < num; f++) {
-      for (std::size_t j = 0; j < sizes[i]; j++) {
-        auto row_id = ridx[i][j];
-        int slot = slots_[f + num * row_id];
-        if ((slot < 0) || (slot >= num_slot)) {
+    for (std::size_t j = 0; j < sizes[node_id]; j++) {
+
+      auto row_id = ridx[node_id][j];
+
+      for (std::size_t f = 0; f < num_feature; f++) {
+
+        int bin_idx = bin_idx_vec_[f + num_feature * row_id];
+        if ((bin_idx < 0) || (bin_idx >= total_bin_size)) {
           continue;
         }
-        auto &row_ids = row_id_map[slot];
+        auto &row_ids = row_id_map[bin_idx];
         row_ids.push_back(static_cast<int>(row_id));
       }
     }
@@ -266,14 +270,14 @@ void LocalPlugin::BuildEncryptedHistVertPassive(const std::uint64_t **ridx, cons
     }
 
     // Convert map back to array
-    for (int slot = 0; slot < num_slot; slot++) {
-      auto it = encrypted_sum.find(slot);
+    for (int bin_idx = 0; bin_idx < total_bin_size; bin_idx++) {
+      auto it = encrypted_sum.find(bin_idx);
       if (it != encrypted_sum.end()) {
-        encrypted_histo[offset + slot] = it->second;
+        encrypted_histo[offset + bin_idx] = it->second;
       }
     }
 
-    offset += num_slot;
+    offset += total_bin_size;
   }
 
   auto encoder = DamEncoder(kDataSetAggregationResult, true, dam_debug_);

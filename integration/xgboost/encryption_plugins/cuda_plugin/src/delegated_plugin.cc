@@ -15,6 +15,7 @@
  */
 #include "delegated_plugin.h"
 #include "cuda_plugin.h"
+#include "cuda_ct_plugin.h"
 
 namespace nvflare {
 
@@ -24,6 +25,8 @@ DelegatedPlugin::DelegatedPlugin(std::vector<std::pair<std::string_view, std::st
   auto name = get_string(args, "name");
   if (name == "cuda_paillier") {
     plugin_ = new CUDAPlugin(args);
+  } else if (name == "cuda_paillier_cell_table") {
+    plugin_ = new CUDACTPlugin(args);
   } else {
     throw std::invalid_argument{"Unknown plugin name: " + name};
   }
