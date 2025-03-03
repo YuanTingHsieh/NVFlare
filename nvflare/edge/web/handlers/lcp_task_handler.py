@@ -66,7 +66,7 @@ class LcpTaskHandler(EdgeTaskHandler):
             data = reply.get(EdgeProtoKey.DATA)
             response = data.get("response")
         elif status == Status.NO_JOB:
-            self.logger_error(f"Job {task_request.job_id} is done")
+            self.logger.error(f"Job {task_request.job_id} is done")
             response = TaskResponse("NO_JOB", retry_wait=30, job_id=task_request.job_id)
         else:
             self.logger.error(f"Task request for {task_request.job_id} failed with status {status}")
@@ -96,4 +96,3 @@ class LcpTaskHandler(EdgeTaskHandler):
             reply = fl_ctx.get_prop(EdgeContextKey.REPLY_TO_EDGE)
             assert isinstance(reply, dict)
             return reply
-        

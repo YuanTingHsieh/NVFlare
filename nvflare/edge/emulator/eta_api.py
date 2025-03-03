@@ -58,12 +58,39 @@ class EtaApi:
         params = {
             "job_id": job.job_id,
         }
-        response = requests.get(url, params=params, headers=self.common_headers)
-        code = response.status_code
-        if code == 200:
-            return TaskResponse(**response.json())
 
-        raise ApiError(code, "ERROR", f"API Call failed with status code {code}", response.json())
+        try:
+            response = requests.get(url, params=params, headers=self.common_headers)
+            code = response.status_code
+
+            # Debug logging
+            print(f"Request URL: {url}")
+            print(f"Request params: {params}")
+            print(f"Response status: {code}")
+            print(f"Response content: {response.content}")
+
+            if code == 200:
+                try:
+                    json_data = response.json()
+                    return TaskResponse(**json_data)
+                except ValueError as e:
+                    raise ApiError(
+                        code,
+                        "ERROR",
+                        f"Invalid JSON response: {str(e)}",
+                        {"raw_content": response.content.decode("utf-8", errors="ignore")},
+                    )
+
+            # Handle non-200 responses
+            try:
+                error_data = response.json() if response.content else {}
+            except ValueError:
+                error_data = {"raw_content": response.content.decode("utf-8", errors="ignore")}
+
+            raise ApiError(code, "ERROR", f"API Call failed with status code {code}", error_data)
+
+        except requests.exceptions.RequestException as e:
+            raise ApiError(500, "ERROR", f"Request failed: {str(e)}", {"error": str(e)})
 
     def report_result(self, task: TaskResponse, result: dict) -> ResultResponse:
         url = urljoin(self.endpoint, "result")

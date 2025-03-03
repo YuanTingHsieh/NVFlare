@@ -1,5 +1,5 @@
 {
-    "name": "hello_mobile",
+    "name": "xor_mobile",
     "resource_spec": {},
     "deploy_map": {
         "app": ["@ALL"]

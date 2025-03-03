@@ -27,8 +27,7 @@ from nvflare.fuel.utils.validation_utils import check_non_negative_int, check_no
 
 
 class EdgeDispatchExecutor(EdgeTaskExecutor):
-    """This executor dispatches tasks to edge devices and wait for the response from all devices
-    """
+    """This executor dispatches tasks to edge devices and wait for the response from all devices"""
 
     def __init__(self, wait_time=300.0, min_devices=0, aggregator_id=None):
         EdgeTaskExecutor.__init__(self)
@@ -57,11 +56,9 @@ class EdgeDispatchExecutor(EdgeTaskExecutor):
 
     def convert_task(self, task_data: Shareable) -> dict:
         """Convert task_data to a plain dict"""
+        # TODO: do we want to do this?
 
-        return {
-            "weights": task_data.get("weights"),
-            "task_id": self.task_id
-        }
+        return {"task_data": task_data["model"], "task_id": self.task_id}
 
     def convert_result(self, result: dict) -> Shareable:
         """Convert result from device to shareable"""
@@ -78,8 +75,7 @@ class EdgeDispatchExecutor(EdgeTaskExecutor):
         # This device already processed current task
         last_task_id = self.devices.get(device_id, None)
         if self.task_id == last_task_id:
-            return TaskResponse("RETRY", job_id, 30,
-                                message=f"Task {self.task_id} is already processed by this device")
+            return TaskResponse("RETRY", job_id, 30, message=f"Task {self.task_id} is already processed by this device")
 
         task_done = self.current_task.get("task_done")
         task_data = self.convert_task(self.current_task)

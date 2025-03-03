@@ -24,15 +24,17 @@
             "id": "learner",
             "path": "nvflare.edge.executors.edge_dispatch_executor.EdgeDispatchExecutor",
             "args": {
-                "wait_time": 600,
+                "wait_time": 60,
                 "min_devices": 2,
                 "aggregator_id": "aggregator"
             }
         },
         {
             "id": "aggregator",
-            "path": "nvflare.edge.aggregators.edge_result_accumulator.EdgeResultAccumulator",
-            "args": {}
+            "path": "edge_json_accumulator.EdgeJsonAccumulator",
+            "args": {
+                "aggr_key": "data"
+            }
         }
     ]
 }
