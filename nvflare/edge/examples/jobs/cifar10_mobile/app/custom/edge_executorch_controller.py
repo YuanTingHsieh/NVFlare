@@ -64,7 +64,7 @@ class EdgeExecutorchController(Controller):
         for key, value in tensor_data.items():
             tensor = torch.Tensor(value["data"]).reshape(value["sizes"])
             grad_dict[key] = tensor / divide_factor
-        print("get grad dict:", grad_dict)
+        #print("get grad dict:", grad_dict)
         return grad_dict
 
     def _update_model(self, aggregated_grads: Dict[str, Tensor]) -> None:
@@ -149,7 +149,7 @@ class EdgeExecutorchController(Controller):
                 # Convert aggregated gradients to PyTorch tensors
                 divide_factor = aggr_result["num_devices"]
                 aggregated_grads = self._tensor_from_json(aggr_result[MsgKey.RESULT], divide_factor)
-                self.log_info(fl_ctx, f"Aggregated gradients as Tensor: {aggregated_grads}")
+                #self.log_info(fl_ctx, f"Aggregated gradients as Tensor: {aggregated_grads}")
 
                 # Update model weights using aggregated gradients
                 self._update_model(aggregated_grads)
