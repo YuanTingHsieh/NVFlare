@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from typing import Tuple
+
 import flwr.proto.grpcadapter_pb2 as pb2
 
 from nvflare.apis.fl_context import FLContext
@@ -28,7 +31,7 @@ class GrpcServerConnector(FlowerServerConnector):
         self,
         int_client_grpc_options=None,
         flower_server_ready_timeout=Constant.FLOWER_SERVER_READY_TIMEOUT,
-        monitor_interval: float = 1.0,
+        monitor_interval: float = 60.0,
     ):
         FlowerServerConnector.__init__(self, monitor_interval)
         self.int_client_grpc_options = int_client_grpc_options
@@ -50,7 +53,7 @@ class GrpcServerConnector(FlowerServerConnector):
         self._server_stopped = True
         self._exit_code = self.stop_applet()
 
-    def _is_stopped(self) -> (bool, int):
+    def _is_stopped(self) -> Tuple[bool, int]:
         runner_stopped, ec = self.is_applet_stopped()
         if runner_stopped:
             self.logger.debug("applet is stopped!")
@@ -108,16 +111,19 @@ class GrpcServerConnector(FlowerServerConnector):
         Returns: response from Flower server converted to Shareable
 
         """
-        stopped, _ = self.is_applet_stopped()
-        if stopped:
-            self.log_warning(fl_ctx, "dropped app request since applet is already stopped")
-            return make_reply(ReturnCode.SERVICE_UNAVAILABLE)
+        # stopped, _ = self.is_applet_stopped()
+        # if stopped:
+        #    self.log_warning(fl_ctx, "dropped app request since applet is already stopped")
+        #    return make_reply(ReturnCode.SERVICE_UNAVAILABLE)
 
         grpc_client = self.internal_grpc_client
         if not grpc_client:
             return make_reply(ReturnCode.SERVICE_UNAVAILABLE)
 
-        result = grpc_client.send_request(shareable_to_msg_container(request))
+        flwr_request = shareable_to_msg_container(request)
+        self.log_info(fl_ctx, f"XXX Sending {flwr_request.grpc_message_name=} to flower server")
+        result = grpc_client.send_request(flwr_request)
+        self.log_info(fl_ctx, f"XXX Getting {result.grpc_message_name=} from flower server")
 
         if isinstance(result, pb2.MessageContainer):
             return msg_container_to_shareable(result)

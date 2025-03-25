@@ -29,9 +29,9 @@ clientapp = "flwr_pt.client:app"
 num-server-rounds = 3
 
 [tool.flwr.federations]
-default = "local-simulation"
+default = "local-deployment"
 
-[tool.flwr.federations.local-simulation]
+[tool.flwr.federations.local-deployment]
 options.num-supernodes = 2
 address = "127.0.0.1:9093"
 insecure = true

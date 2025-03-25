@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import time
 from abc import ABC, abstractmethod
+from typing import Tuple
 
 from nvflare.security.logging import secure_format_exception
 
@@ -100,7 +102,7 @@ class CLIApplet(Applet, ABC):
         else:
             return rc
 
-    def is_stopped(self) -> (bool, int):
+    def is_stopped(self) -> Tuple[bool, int]:
         if self._start_error:
             return True, Constant.EXIT_CODE_CANT_START
 

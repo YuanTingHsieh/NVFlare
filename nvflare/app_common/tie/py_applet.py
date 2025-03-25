@@ -11,11 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import multiprocessing
 import sys
 import threading
 import time
 from abc import ABC, abstractmethod
+from typing import Tuple
 
 from nvflare.apis.workspace import Workspace
 from nvflare.fuel.utils.log_utils import configure_logging
@@ -213,7 +215,7 @@ class PyApplet(Applet, ABC):
                     p.kill()
                     return -9
 
-    def is_stopped(self) -> (bool, int):
+    def is_stopped(self) -> Tuple[bool, int]:
         if not self.runner:
             raise RuntimeError("PyRunner is not set")
 

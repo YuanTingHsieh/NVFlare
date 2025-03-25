@@ -14,6 +14,7 @@
 import json
 import threading
 import time
+from typing import Tuple
 
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.workspace import Workspace
@@ -115,6 +116,7 @@ class FlowerServerApplet(Applet):
 
         self._start_error = False
         self.stop_lock = threading.Lock()
+        self.start_time = None
 
     def _start_process(self, name: str, cmd_desc: CommandDescriptor, fl_ctx: FLContext) -> ProcessManager:
         self.logger.info(f"starting {name}: {cmd_desc.cmd}")
@@ -191,6 +193,7 @@ class FlowerServerApplet(Applet):
         # wait until superlink's fleet_api_addr is ready before starting server app
         # fleet_api_addr is superlink's gRPC server address for Flare to connect to.
         start_time = time.time()
+        self.start_time = start_time
         create_channel(
             server_addr=fleet_api_addr,
             grpc_options=None,
@@ -216,13 +219,11 @@ class FlowerServerApplet(Applet):
         )
 
     def _run_flower_command(self, command: str):
-        self.logger.debug(f"running flower command: {command}")
         cmd_desc = CommandDescriptor(cmd=command)
         reply = run_command(cmd_desc)
         if not isinstance(reply, str):
             raise RuntimeError(f"failed to run command '{command}': expect reply to be str but got {type(reply)}")
 
-        self.logger.debug(f"flower command {command}: {reply=}")
         # the reply must be a json str
         try:
             result = json.loads(reply)
@@ -242,7 +243,6 @@ class FlowerServerApplet(Applet):
             self.logger.error(err)
             raise RuntimeError(err)
 
-        self.logger.debug(f"result of {command}: {result}")
         return result
 
     @staticmethod
@@ -341,7 +341,7 @@ class FlowerServerApplet(Applet):
         else:
             return False, 0
 
-    def is_stopped(self) -> (bool, int):
+    def is_stopped(self) -> Tuple[bool, int]:
         """Check whether the server applet is already stopped
 
         Returns: a tuple of: whether the applet is stopped, exit code if stopped.

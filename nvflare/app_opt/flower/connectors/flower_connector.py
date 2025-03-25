@@ -73,13 +73,14 @@ class FlowerServerConnector(Connector):
         Returns: response from the Flower server converted to Shareable
 
         """
-        stopped, ec = self._is_stopped()
-        if stopped:
-            self.log_warning(fl_ctx, f"dropped request '{op}' since connector is already stopped {ec=}")
-            return make_reply(ReturnCode.SERVICE_UNAVAILABLE)
+        self.log_info(fl_ctx, f"process_app_request is called with {op=}")
+        # stopped, ec = self._is_stopped()
+        # if stopped:
+        #    self.log_warning(fl_ctx, f"dropped request '{op}' since connector is already stopped {ec=}")
+        #    return make_reply(ReturnCode.SERVICE_UNAVAILABLE)
 
         reply = self.send_request_to_flower(request, fl_ctx)
-        self.log_debug(fl_ctx, f"received reply for '{op}'")
+        self.log_info(fl_ctx, f"received reply for '{op}'")
         return reply
 
 

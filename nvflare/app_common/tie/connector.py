@@ -15,7 +15,7 @@
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Tuple
 
 from nvflare.apis.fl_component import FLComponent
 from nvflare.apis.fl_context import FLContext
@@ -35,7 +35,7 @@ class Connector(ABC, FLComponent):
     The Connector class defines commonly required methods for all Connector implementations.
     """
 
-    def __init__(self, monitor_interval: float = 0.5):
+    def __init__(self, monitor_interval: float = 60.0):
         """Constructor of Connector"""
         FLComponent.__init__(self)
         check_positive_number("monitor_interval", monitor_interval)
@@ -125,7 +125,7 @@ class Connector(ABC, FLComponent):
         """
         pass
 
-    def _is_stopped(self) -> (bool, int):
+    def _is_stopped(self) -> Tuple[bool, int]:
         """Called by the connector's monitor to know whether the connector is stopped.
         Note that this method is not called by Controller/Executor.
 
@@ -197,7 +197,7 @@ class Connector(ABC, FLComponent):
         """
         return self.applet.stop(timeout)
 
-    def is_applet_stopped(self) -> (bool, int):
+    def is_applet_stopped(self) -> Tuple[bool, int]:
         """Check whether the applet is already stopped
 
         Returns: a tuple of (whether the applet is stopped, exit code)
@@ -239,7 +239,7 @@ class Connector(ABC, FLComponent):
         if not fl_ctx:
             fl_ctx = self.engine.new_context()
 
-        self.logger.debug(f"sending request with RM: {op=}")
+        self.logger.info(f"sending request with RM: {op=}")
         return ReliableMessage.send_request(
             target=target,
             topic=Constant.TOPIC_APP_REQUEST,

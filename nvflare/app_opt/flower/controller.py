@@ -29,7 +29,7 @@ class FlowerController(TieController):
         database: str = "",
         superlink_ready_timeout: float = 10.0,
         superlink_grace_period: float = 2.0,
-        monitor_interval: float = 0.5,
+        monitor_interval: float = 60.0,
         configure_task_name=TieConstant.CONFIG_TASK_NAME,
         configure_task_timeout=TieConstant.CONFIG_TASK_TIMEOUT,
         start_task_name=TieConstant.START_TASK_NAME,

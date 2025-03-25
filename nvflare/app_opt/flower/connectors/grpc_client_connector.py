@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import threading
 import time
+from typing import Tuple
 
 import flwr.proto.grpcadapter_pb2 as pb2
 from flwr.proto.grpcadapter_pb2_grpc import GrpcAdapterServicer
@@ -80,7 +82,7 @@ class GrpcClientConnector(FlowerClientConnector, GrpcAdapterServicer):
         time.sleep(1.0)
         self.stop_applet(self.client_shutdown_timeout)
 
-    def _is_stopped(self) -> (bool, int):
+    def _is_stopped(self) -> Tuple[bool, int]:
         applet_stopped, ec = self.is_applet_stopped()
         if applet_stopped:
             return applet_stopped, ec
@@ -154,10 +156,13 @@ class GrpcClientConnector(FlowerClientConnector, GrpcAdapterServicer):
                 self.logger.debug("asked supernode to exit_1!")
                 return reply_should_exit()
 
+            self.logger.info(f"XXX Sending flower request {request.grpc_message_name=} XXX")
             reply = self._send_flower_request(msg_container_to_shareable(request))
             rc = reply.get_return_code()
             if rc == ReturnCode.OK:
-                return shareable_to_msg_container(reply)
+                rep = shareable_to_msg_container(reply)
+                self.logger.info(f"XXX Got flower reply {rep.grpc_message_name=} XXX")
+                return rep
             else:
                 # server side already ended
                 self.logger.warning(f"Flower server has stopped with RC {rc}")

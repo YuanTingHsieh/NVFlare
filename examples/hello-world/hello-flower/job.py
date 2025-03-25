@@ -40,6 +40,8 @@ def main():
         name=args.job_name,
         flower_content=args.content_dir,
         stream_metrics=args.stream_metrics,
+        tx_timeout=200.0,
+        max_client_op_interval=180.0,
         extra_env=env,
     )
 
