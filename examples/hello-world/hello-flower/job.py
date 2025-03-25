@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from argparse import ArgumentParser
 
 from nvflare.app_opt.flower.flower_pt_job import FlowerPyTorchJob
@@ -44,7 +43,7 @@ def main():
     )
 
     job.export_job(args.export_dir)
-    job.simulator_run(os.path.join(args.workdir, job.name), gpu="0", n_clients=2)
+    job.simulator_run(args.workdir, gpu="0", n_clients=2)
 
 
 if __name__ == "__main__":

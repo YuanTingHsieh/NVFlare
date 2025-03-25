@@ -28,6 +28,8 @@ import nvflare.client as flare
 # initializes NVFlare interface
 from nvflare.client.tracking import SummaryWriter
 
+flare.init()
+
 
 # Define FlowerClient and client_fn
 class FlowerClient(NumPyClient):
@@ -40,9 +42,7 @@ class FlowerClient(NumPyClient):
             self.set_step(0)
 
     def set_step(self, step: int):
-        record = RecordSet()
-        record["step"] = MetricsRecord({"step": step})
-        self.flwr_context.state = record
+        self.flwr_context.state = RecordSet(metrics_records={"step": MetricsRecord({"step": step})})
 
     def get_step(self):
         return int(self.flwr_context.state.metrics_records["step"]["step"])
@@ -81,14 +81,3 @@ def client_fn(context: Context):
 app = ClientApp(
     client_fn=client_fn,
 )
-
-
-@app.lifespan()
-def lifespan(ctxt: Context) -> None:
-    flare.init()
-    print("ClientApp entering. Flare initialized.")
-
-    yield
-
-    flare.shutdown()
-    print("ClientApp exiting. Flare shutdown.")
