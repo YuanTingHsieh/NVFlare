@@ -1,0 +1,32 @@
+{
+    "format_version": 2,
+    "workflows": [
+        {
+            "id": "controller",
+            "path": "nvflare.app_opt.flower.controller.FlowerController",
+            "args": {}
+        }
+    ],
+    "components": [
+        {
+          "id": "mlflow_receiver_with_tracking_uri",
+          "path": "nvflare.app_opt.tracking.mlflow.mlflow_receiver.MLflowReceiver",
+          "args": {
+            "tracking_uri": "http://localhost:6006",
+            "kw_args": {
+              "experiment_name": "flwr-pt-experiment",
+              "run_name": "flwr-pt-with-mlflow",
+              "experiment_tags": {
+                "mlflow.note.content": "## **Hello PyTorch experiment**"
+              },
+              "run_tags": {
+                "mlflow.note.content": "## Federated Experiment tracking with MLflow using Flower & NVFlare"
+              }
+            },
+            "artifact_location": "artifacts"
+          }
+        }
+    ],
+    "task_data_filters": [],
+    "task_result_filters": []
+}

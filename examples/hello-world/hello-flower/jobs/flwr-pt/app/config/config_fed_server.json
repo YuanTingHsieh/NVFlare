@@ -1,0 +1,13 @@
+{
+    "format_version": 2,
+    "workflows": [
+        {
+            "id": "controller",
+            "path": "nvflare.app_opt.flower.controller.FlowerController",
+            "args": {}
+        }
+    ],
+    "components": [],
+    "task_data_filters": [],
+    "task_result_filters": []
+}
