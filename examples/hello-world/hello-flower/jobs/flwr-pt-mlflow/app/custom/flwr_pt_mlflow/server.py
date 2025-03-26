@@ -48,7 +48,8 @@ parameters = ndarrays_to_parameters(ndarrays)
 strategy = FedAvg(
     fraction_fit=1.0,  # Select all available clients
     fraction_evaluate=0.0,  # Disable evaluation
-    min_available_clients=2,
+    min_available_clients=1,
+    min_fit_clients=1,
     fit_metrics_aggregation_fn=weighted_average,
     initial_parameters=parameters,
 )

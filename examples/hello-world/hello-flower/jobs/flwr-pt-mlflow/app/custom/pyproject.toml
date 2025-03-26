@@ -31,4 +31,4 @@ num-server-rounds = 3
 default = "local-simulation"
 
 [tool.flwr.federations.local-simulation]
-options.num-supernodes = 2
+options.num-supernodes = 1
