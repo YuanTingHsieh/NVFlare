@@ -1,6 +1,4 @@
-#!/usr/bin/env python3
-
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,8 +12,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-PYTHON_PATH_SHARED_DIR = "/local/custom"
-DEFAULT_APPLICATION_INSTALL_DIR = "/opt/nvflare/apps"
-CUSTOM_DIR_NAME = "custom"
-APPLICATION_CODE_DIR = "application"
-APPLICATION_SHARED_CODE_DIR = "application-share"
+from .cifar10_model_learner import CIFAR10ModelLearner
+from .cifar10_scaffold_model_learner import CIFAR10ScaffoldModelLearner
