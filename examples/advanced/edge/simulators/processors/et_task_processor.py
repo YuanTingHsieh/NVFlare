@@ -182,7 +182,12 @@ class ETTaskProcessor(DeviceTaskProcessor, ABC):
         last_params = clone_params(et_model.named_parameters())
         param_diff = calc_params_diff(initial_params, last_params)
         result = tensor_dict_to_json(param_diff)
-        return result
+        result_dxo_dict = {
+            "data": result,
+            "meta": {},
+            "data_kind": "tensor_diff"
+        }
+        return result_dxo_dict
 
     def process_task(self, task: TaskResponse) -> dict:
         """Process received task and return results.

@@ -72,18 +72,20 @@ class ETEdgeModelExecutor(EdgeModelExecutor):
         self.log_info(fl_ctx, f"ETEdgeModelExecutor model_dict keys are: {model_dict.keys()}")
         return model_dict
     
-    def _convert_to_tensor_dxo(self, result_dict: dict, fl_ctx: FLContext):
-        """Convert the result_dict to a tensor DXO"""
+    def _convert_to_tensor_dxo(self, result_dxo_dict: dict, fl_ctx: FLContext):
+        """Convert the result_dxo_dict to a tensor dxo dict"""
         d = {}
         d["kind"] = DataKind.WEIGHT_DIFF
         tensor_dict = {}
-        for key, value in result_dict.items():
+        for key, value in result_dxo_dict["data"].items():
             tensor = torch.Tensor(value["data"]).reshape(value["sizes"]).cpu().numpy()
             tensor_dict[key] = tensor
 
         d["data"] = {
             "dict": tensor_dict
         }
+        # TODO: pass along meta if we want
+        # d["meta"] = result_dxo_dict["meta"]
         return d
 
     def _convert_device_result_to_model_update(
@@ -104,11 +106,11 @@ class ETEdgeModelExecutor(EdgeModelExecutor):
             )
             raise ValueError(f"missing '{CookieKey.MODEL_VERSION}' cookie")
 
-        result_dict = result_report.result
+        result_dxo_dict = result_report.result
 
         # Convert the result_dict json to a tensor DXO dict
         self.log_info(fl_ctx, f"ETEdgeModelExecutor converting result_dict to tensor DXO")
-        result_dict = self._convert_to_tensor_dxo(result_dict, fl_ctx)
+        result_dict = self._convert_to_tensor_dxo(result_dxo_dict, fl_ctx)
 
         if not isinstance(result_dict, dict) or "data" not in result_dict or "dict" not in result_dict["data"]:
             self.log_error(fl_ctx, f"result_report.result is not a valid structure: {result_report.result}")

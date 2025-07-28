@@ -35,10 +35,11 @@ from nvflare.security.logging import secure_format_exception, secure_log_traceba
 
 class EdgeModelExecutor(EdgeTaskExecutor):
 
-    def __init__(self, aggr_factory_id: str, max_model_versions: int, update_timeout=60):
+    def __init__(self, aggr_factory_id: str, max_model_versions: int, update_timeout=60, retry_wait=5):
         EdgeTaskExecutor.__init__(self, "", update_timeout)
         self.aggr_factory_id = aggr_factory_id
         self.max_model_versions = max_model_versions
+        self.retry_wait = retry_wait
 
     def get_updater(self, fl_ctx: FLContext):
         engine = fl_ctx.get_engine()
@@ -112,9 +113,8 @@ class EdgeModelExecutor(EdgeTaskExecutor):
         )
         return self.accept_update(result_report.task_id, update_report.to_shareable(), fl_ctx)
 
-    @staticmethod
-    def _make_retry(job_id, msg: str):
-        return TaskResponse(EdgeApiStatus.RETRY, job_id, 30, message=msg)
+    def _make_retry(self, job_id, msg: str):
+        return TaskResponse(EdgeApiStatus.RETRY, job_id, self.retry_wait, message=msg)
 
     @staticmethod
     def _make_cookie(model_version, device_selection_id):
