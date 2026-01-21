@@ -35,7 +35,7 @@ from nvflare.tool.poc.service_constants import FlareServiceConstants as SC
 
 from .session_mgr import SessionManager
 
-STOP_POC_TIMEOUT = 10
+STOP_POC_TIMEOUT = 30
 SERVICE_START_TIMEOUT = 3
 DEFAULT_ADMIN_USER = "admin@nvidia.com"
 
@@ -173,6 +173,31 @@ class PocEnv(ExecEnv):
 
         return True
 
+    def _force_kill_poc_processes(self):
+        """Force kill any remaining POC processes that didn't stop gracefully."""
+        import psutil
+        import signal
+
+        killed_count = 0
+        for proc in psutil.process_iter(['pid', 'cmdline', 'cwd']):
+            try:
+                cmdline = proc.info.get('cmdline', [])
+                cwd = proc.info.get('cwd', '')
+                
+                # Check if this process is related to this POC workspace
+                if cmdline and cwd and self.poc_workspace in cwd:
+                    # Check if it's an NVFlare process
+                    cmdline_str = ' '.join(cmdline)
+                    if 'nvflare' in cmdline_str or 'fl_admin.sh' in cmdline_str or 'start.sh' in cmdline_str:
+                        print(f"Force killing POC process {proc.info['pid']}: {cmdline_str[:80]}")
+                        proc.send_signal(signal.SIGKILL)
+                        killed_count += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+        
+        if killed_count > 0:
+            print(f"Killed {killed_count} POC processes")
+
     def stop(self, clean_poc: bool = False):
         """Try to stop and clean existing POC.
 
@@ -188,6 +213,8 @@ class PocEnv(ExecEnv):
                 excluded=[self.username],  # Exclude admin console (consistent with start)
                 services_list=[],
             )
+            # Give processes a moment to start shutting down
+            time.sleep(2)
             count = 0
             poc_running = True
             while count < STOP_POC_TIMEOUT:
@@ -200,14 +227,18 @@ class PocEnv(ExecEnv):
             if clean_poc:
                 if poc_running:
                     print(
-                        f"Warning: POC still running after {STOP_POC_TIMEOUT} seconds, cannot clean workspace. Skipping cleanup."
+                        f"Warning: POC still running after {STOP_POC_TIMEOUT} seconds. "
+                        f"Force killing remaining processes..."
                     )
-                else:
-                    _clean_poc(self.poc_workspace)
+                    # Force kill any remaining POC processes
+                    self._force_kill_poc_processes()
+                    time.sleep(2)  # Give OS time to clean up
+                
+                _clean_poc(self.poc_workspace)
+                print(f"Removing POC workspace: {self.poc_workspace}")
+                shutil.rmtree(self.poc_workspace, ignore_errors=True)
         except Exception as e:
             print(f"Warning: Failed to stop and clean existing POC: {e}")
-        print(f"Removing POC workspace: {self.poc_workspace}")
-        shutil.rmtree(self.poc_workspace, ignore_errors=True)
 
     def get_job_status(self, job_id: str) -> Optional[str]:
         return self._get_session_manager().get_job_status(job_id)
