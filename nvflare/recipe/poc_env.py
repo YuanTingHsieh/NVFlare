@@ -36,7 +36,6 @@ from nvflare.tool.poc.service_constants import FlareServiceConstants as SC
 
 from .session_mgr import SessionManager
 
-STOP_POC_TIMEOUT = 10
 SERVICE_START_TIMEOUT = 3
 DEFAULT_ADMIN_USER = "admin@nvidia.com"
 
@@ -87,6 +86,7 @@ class PocEnv(ExecEnv):
         docker_image: Optional[str] = None,
         project_conf_path: str = "",
         username: str = DEFAULT_ADMIN_USER,
+        use_once: bool = True,
         extra: Optional[dict] = None,
     ):
         """Initialize POC execution environment.
@@ -101,6 +101,8 @@ class PocEnv(ExecEnv):
             project_conf_path (str, optional): Path to the project configuration file. Defaults to "".
                 If specified, 'number_of_clients','clients' and 'docker' specific options will be ignored.
             username (str, optional): Admin user. Defaults to "admin@nvidia.com".
+            use_once (bool, optional): If True, use "--once" flag to disable daemon mode (no auto-restart).
+                Useful for testing/profiling. Defaults to True.
             extra: extra env info.
         """
         super().__init__(extra)
@@ -123,6 +125,7 @@ class PocEnv(ExecEnv):
         self.project_conf_path = v.project_conf_path
         self.docker_image = v.docker_image
         self.username = v.username
+        self.use_once = use_once
         self._session_manager = None  # Lazy initialization
 
     def deploy(self, job: FedJob):
@@ -156,11 +159,14 @@ class PocEnv(ExecEnv):
             examples_dir=None,
         )
 
+        # Pass --once flag if use_once is True to disable daemon mode
+        startup_args = "--once" if self.use_once else ""
         _start_poc(
             poc_workspace=self.poc_workspace,
             gpu_ids=self.gpu_ids,
             excluded=[self.username],
             services_list=[],
+            startup_args=startup_args,
         )
         print("POC services started successfully")
 
@@ -182,41 +188,66 @@ class PocEnv(ExecEnv):
 
         return True
 
+    def _force_kill_poc_processes(self):
+        """Force kill any POC processes in this workspace."""
+        import psutil
+
+        killed_count = 0
+        for proc in psutil.process_iter(["pid", "cmdline", "cwd"]):
+            try:
+                cmdline = proc.info.get("cmdline", [])
+                cwd = proc.info.get("cwd", "") or ""
+
+                if not cmdline:
+                    continue
+
+                cmdline_str = " ".join(str(c) for c in cmdline if c)
+
+                # Kill if workspace is in cmdline or cwd
+                if self.poc_workspace in cmdline_str or self.poc_workspace in cwd:
+                    proc.kill()
+                    killed_count += 1
+            except:
+                pass  # Process already gone or inaccessible
+
+        if killed_count > 0:
+            print(f"Killed {killed_count} POC processes")
+
     def stop(self, clean_poc: bool = False):
-        """Try to stop and clean existing POC.
+        """Stop and optionally clean POC workspace.
 
         Args:
-            clean_poc (bool, optional): Whether to clean the POC workspace. Defaults to False.
+            clean_poc (bool, optional): Whether to remove the POC workspace. Defaults to False.
         """
-        project_config, service_config = setup_service_config(self.poc_workspace)
-
         try:
-            print("Stopping existing POC services...")
+            # Try graceful shutdown first
+            print("Stopping POC services...")
             _stop_poc(
                 poc_workspace=self.poc_workspace,
-                excluded=[self.username],  # Exclude admin console (consistent with start)
+                excluded=[self.username],
                 services_list=[],
             )
-            count = 0
-            poc_running = True
-            while count < STOP_POC_TIMEOUT:
-                if not is_poc_running(self.poc_workspace, service_config, project_config):
-                    poc_running = False
-                    break
-                time.sleep(1)
-                count += 1
-
-            if clean_poc:
-                if poc_running:
-                    print(
-                        f"Warning: POC still running after {STOP_POC_TIMEOUT} seconds, cannot clean workspace. Skipping cleanup."
-                    )
-                else:
-                    _clean_poc(self.poc_workspace)
+            time.sleep(2)
         except Exception as e:
-            print(f"Warning: Failed to stop and clean existing POC: {e}")
-        print(f"Removing POC workspace: {self.poc_workspace}")
-        shutil.rmtree(self.poc_workspace, ignore_errors=True)
+            print(f"Graceful stop failed: {e}")
+
+        # Force kill any remaining processes
+        try:
+            self._force_kill_poc_processes()
+            time.sleep(1)
+        except Exception as e:
+            print(f"Force kill failed: {e}")
+
+        # Clean up workspace if requested
+        if clean_poc and os.path.exists(self.poc_workspace):
+            try:
+                print(f"Removing POC workspace: {self.poc_workspace}")
+                _clean_poc(self.poc_workspace)
+                shutil.rmtree(self.poc_workspace, ignore_errors=True)
+                print("POC workspace removed")
+            except Exception as e:
+                print(f"Cleanup failed: {e}")
+                shutil.rmtree(self.poc_workspace, ignore_errors=True)
 
     def get_job_status(self, job_id: str) -> Optional[str]:
         return self._get_session_manager().get_job_status(job_id)
