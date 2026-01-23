@@ -58,12 +58,21 @@ class WeightedAggregationHelper(object):
                 current_total = self.total.get(k, None)
 
                 if current_total is None:
-                    # First contribution: clone the tensor to avoid modifying input
+                    # First contribution: initialize accumulator
+                    # For InTime aggregation: result is GC'd after callback, so in-place modification is safe
+                    # This saves memory by reusing the input tensor instead of creating a new one
                     if self._has_inplace_ops(v):
                         if self.weigh_by_local_iter:
-                            self.total[k] = v.clone().mul_(weight)
+                            # Check if float tensor
+                            if hasattr(v.dtype, "is_floating_point") and v.dtype.is_floating_point:
+                                # Modify in-place and store reference (saves memory)
+                                self.total[k] = v.mul_(weight)
+                            else:
+                                # Integer/bool tensors: store reference without weighting
+                                self.total[k] = v
                         else:
-                            self.total[k] = v.clone()
+                            # No weighting: store reference
+                            self.total[k] = v
                     else:
                         # Fallback for non-PyTorch tensors
                         if self.weigh_by_local_iter:
@@ -76,8 +85,16 @@ class WeightedAggregationHelper(object):
                     if self._has_inplace_ops(v) and self._has_inplace_ops(current_total):
                         if self.weigh_by_local_iter:
                             # In-place: self.total[k] += v * weight
-                            # But to avoid creating temporary, we do: self.total[k].add_(v, alpha=weight)
-                            self.total[k].add_(v, alpha=weight)
+                            # Check if float tensor before using alpha (integer tensors don't support alpha)
+                            if (
+                                hasattr(current_total.dtype, "is_floating_point")
+                                and current_total.dtype.is_floating_point
+                            ):
+                                self.total[k].add_(v, alpha=weight)
+                            else:
+                                # Integer/bool tensors: just add without weighting
+                                # (typically buffers/masks that should be the same across clients)
+                                self.total[k].add_(v)
                         else:
                             # In-place: self.total[k] += v
                             self.total[k].add_(v)
@@ -103,14 +120,20 @@ class WeightedAggregationHelper(object):
             aggregated_dict = {}
             for k, v in self.total.items():
                 if self._has_inplace_ops(v):
-                    # For PyTorch tensors, use in-place division to avoid creating a copy
-                    # But we need to return the result, so clone first
-                    aggregated_dict[k] = v.div_(self.counts[k])
+                    # For PyTorch tensors
+                    # Check if float tensor - only divide float tensors by counts
+                    # Integer/bool tensors are summed, not averaged (typically buffers/masks)
+                    if hasattr(v.dtype, "is_floating_point") and v.dtype.is_floating_point:
+                        # Float tensor: compute weighted average
+                        aggregated_dict[k] = v.div_(self.counts[k])
+                    else:
+                        # Integer/bool tensor: return sum (already accumulated without weighting)
+                        aggregated_dict[k] = v
                 else:
                     # Fallback for non-PyTorch tensors
                     aggregated_dict[k] = v * (1.0 / self.counts[k])
 
-            # Note: self.total now contains the final averaged values
+            # Note: self.total now contains the final averaged values (for float tensors)
             # If you need to preserve self.total, clone before div_ above
             self.reset_stats()
             return aggregated_dict

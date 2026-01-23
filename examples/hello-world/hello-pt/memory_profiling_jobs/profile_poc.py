@@ -9,13 +9,12 @@ import time
 from typing import Tuple
 
 import psutil
-from small_model import GigabyteModel
+from large_model import GigabyteModel
 
 from nvflare.apis.dxo import DataKind
 from nvflare.app_common.aggregators.intime_accumulate_model_aggregator import InTimeAccumulateWeightedAggregator
 from nvflare.app_common.shareablegenerators.full_model_shareable_generator import FullModelShareableGenerator
 from nvflare.app_common.workflows.fedavg import FedAvg
-from nvflare.app_common.workflows.fedavg_mem_efficient import FedAvgMemEfficient
 from nvflare.app_common.workflows.scatter_and_gather import ScatterAndGather
 from nvflare.app_opt.pt.file_model_persistor import PTFileModelPersistor
 from nvflare.app_opt.pt.job_config.model import PTModel
@@ -284,11 +283,11 @@ class MemoryMonitor:
 
 
 class CustomFedAvgRecipe(Recipe):
-    """Custom FedAvg Recipe with optional memory-efficient controller."""
+    """Custom FedAvg Recipe using InTime aggregation (already memory-efficient)."""
 
-    def __init__(self, memory_efficient: bool, n_clients: int = 1):
+    def __init__(self, n_clients: int = 1):
         # Create FedJob
-        job = FedJob(name=f"fedavg_{'mem_eff' if memory_efficient else 'standard'}")
+        job = FedJob(name="fedavg")
 
         # Model with persistor that keeps PyTorch tensors (no NumPy conversion)
         model = GigabyteModel()
@@ -296,17 +295,11 @@ class CustomFedAvgRecipe(Recipe):
         pt_model = PTModel(model=model, persistor=persistor)
         job.to_server(pt_model)
 
-        # Use FedAvgMemEfficient if requested, otherwise standard FedAvg
-        if memory_efficient:
-            controller = FedAvgMemEfficient(
-                num_clients=n_clients,
-                num_rounds=3,
-            )
-        else:
-            controller = FedAvg(
-                num_clients=n_clients,
-                num_rounds=3,
-            )
+        # FedAvg with InTime aggregation (already memory-efficient)
+        controller = FedAvg(
+            num_clients=n_clients,
+            num_rounds=3,
+        )
         job.to_server(controller, id="controller")
 
         # Add tensor streaming
@@ -462,20 +455,15 @@ def main():
     print("Rounds: 3")
     print("=" * 60)
 
-    # Job 1: FedAvg Standard
-    recipe1 = CustomFedAvgRecipe(memory_efficient=False, n_clients=n_clients)
-    result1 = profile_job("FedAvg (Standard)", recipe1, 1, n_clients, debug=False)
-    results.append(("Job 1: FedAvg (Standard)", *result1))
+    # Job 1: FedAvg (InTime aggregation - already memory-efficient)
+    recipe1 = CustomFedAvgRecipe(n_clients=n_clients)
+    result1 = profile_job("FedAvg (InTime)", recipe1, 1, n_clients, debug=False)
+    results.append(("Job 1: FedAvg (InTime)", *result1))
 
     # Job 2: Scatter and Gather
     recipe2 = ScatterGatherRecipe(n_clients=n_clients)
     result2 = profile_job("Scatter and Gather", recipe2, 2, n_clients, debug=False)
     results.append(("Job 2: Scatter and Gather", *result2))
-
-    # Job 3: FedAvg Memory-Efficient
-    recipe3 = CustomFedAvgRecipe(memory_efficient=True, n_clients=n_clients)
-    result3 = profile_job("FedAvg (Memory-Efficient)", recipe3, 3, n_clients, debug=False)
-    results.append(("Job 3: FedAvg (Memory-Efficient)", *result3))
 
     # Write summary
     with open("results/poc_summary.txt", "w") as f:
