@@ -18,7 +18,7 @@ Job 1: FedAvg with standard aggregation (memory_efficient=False)
 Expected memory: ~5 GB (3 clients × 1GB + buffer + result + framework)
 """
 
-from large_model_1gb import GigabyteModel
+from small_model import GigabyteModel
 
 from nvflare.app_common.workflows.fedavg import FedAvg
 from nvflare.app_opt.pt.file_model_persistor import PTFileModelPersistor

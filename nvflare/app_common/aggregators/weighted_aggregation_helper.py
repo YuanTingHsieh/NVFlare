@@ -46,7 +46,7 @@ class WeightedAggregationHelper(object):
 
     def _has_inplace_ops(self, tensor):
         """Check if tensor supports in-place operations (PyTorch tensors)."""
-        return hasattr(tensor, 'add_') and hasattr(tensor, 'mul_')
+        return hasattr(tensor, "add_") and hasattr(tensor, "mul_")
 
     def add(self, data, weight, contributor_name, contribution_round):
         """Compute weighted sum and sum of weights."""
@@ -54,9 +54,9 @@ class WeightedAggregationHelper(object):
             for k, v in data.items():
                 if self.exclude_vars is not None and self.exclude_vars.search(k):
                     continue
-                
+
                 current_total = self.total.get(k, None)
-                
+
                 if current_total is None:
                     # First contribution: clone the tensor to avoid modifying input
                     if self._has_inplace_ops(v):
@@ -88,7 +88,7 @@ class WeightedAggregationHelper(object):
                         else:
                             self.total[k] = current_total + v
                     self.counts[k] = self.counts[k] + weight
-                    
+
             self.history.append(
                 {
                     "contributor_name": contributor_name,
@@ -109,7 +109,7 @@ class WeightedAggregationHelper(object):
                 else:
                     # Fallback for non-PyTorch tensors
                     aggregated_dict[k] = v * (1.0 / self.counts[k])
-            
+
             # Note: self.total now contains the final averaged values
             # If you need to preserve self.total, clone before div_ above
             self.reset_stats()

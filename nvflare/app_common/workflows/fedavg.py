@@ -17,8 +17,6 @@ import os
 import time
 from typing import Any, Dict, Optional, Union
 
-import torch
-
 from nvflare.apis.fl_constant import FLMetaKey
 from nvflare.app_common.abstract.fl_model import FLModel, ParamsType
 from nvflare.app_common.aggregators.model_aggregator import ModelAggregator
@@ -135,61 +133,61 @@ class FedAvg(BaseFedAvg):
 
     def _aggregate_inplace(self, target_model: FLModel) -> FLModel:
         """Memory-efficient aggregation that modifies target_model in-place.
-        
+
         Customer's optimization: Aggregates directly into self.model (global model) using
         instance variable self.results, then immediately frees memory parameter-by-parameter.
-        
+
         This implementation:
         1. Uses self.results instance variable (following customer pattern)
         2. Aggregates directly into target_model.params (no intermediate buffer)
         3. Deletes each client param immediately after processing (frees memory as it goes)
         4. Uses in-place operations to avoid temporary tensor allocations
-        
+
         Memory usage: ~(num_clients + 1) * model_size at start,
                       dropping to ~1 * model_size as params are freed
         vs standard aggregator: (num_clients + 2) * model_size throughout
-        
+
         Args:
             target_model: FLModel to aggregate into (modified in-place)
-            
+
         Returns:
             target_model (same reference, modified in-place)
         """
         if not self.results or not self.results[0].params:
             return target_model
-        
+
         # Calculate total weights per parameter
         total_weights = {}
         for result in self.results:
             weight = result.meta.get(FLMetaKey.NUM_STEPS_CURRENT_ROUND, 1.0)
             for k in result.params.keys():
                 total_weights[k] = total_weights.get(k, 0.0) + weight
-        
+
         # Determine if this is DIFF aggregation (don't zero out target)
         is_diff = self.results[0].params_type == ParamsType.DIFF
-        
+
         # Get all parameter keys from first result
         param_keys = list(self.results[0].params.keys())
-        
+
         # Process parameter by parameter to minimize memory usage
         # Assumes all params are PyTorch tensors (enforced by server_expected_format=PYTORCH)
         for k in param_keys:
             if k not in target_model.params:
                 continue
-            
+
             # For FULL params: zero out target first
             # For DIFF params: keep existing values (differential update)
             if not is_diff:
                 target_model.params[k].zero_()
-            
+
             # Accumulate weighted contributions from all clients
             for i, result in enumerate(self.results):
                 if k not in result.params:
                     continue
-                
+
                 weight = result.meta.get(FLMetaKey.NUM_STEPS_CURRENT_ROUND, 1.0)
                 normalized_weight = weight / total_weights[k]
-                
+
                 # In-place accumulation for PyTorch tensors
                 # For integer/bool tensors (like buffer sizes, masks), skip alpha scaling
                 if target_model.params[k].dtype.is_floating_point:
@@ -198,20 +196,20 @@ class FedAvg(BaseFedAvg):
                 else:
                     # Integer/bool tensors: just add without scaling (they're typically metadata/buffers)
                     target_model.params[k].add_(result.params[k])
-                
+
                 # Free source memory immediately after processing this parameter
                 del result.params[k]
-            
+
             # Force GC after processing each parameter
             gc.collect()
-        
+
         # Clear all client params dicts to ensure memory is freed
         for result in self.results:
             result.params.clear()
-        
+
         # Final GC
         gc.collect()
-        
+
         # Aggregate metrics (keep existing logic, metrics are typically small)
         aggr_metrics = None
         all_metrics = all(r.metrics for r in self.results)
@@ -225,12 +223,12 @@ class FedAvg(BaseFedAvg):
                     contribution_round=result.current_round,
                 )
             aggr_metrics = aggr_metrics_helper.get_result()
-        
+
         # Update target_model metadata
         target_model.metrics = aggr_metrics
         target_model.meta = {"nr_aggregated": len(self.results), "current_round": self.results[0].current_round}
         target_model.params_type = self.results[0].params_type
-        
+
         return target_model
 
     def run(self) -> None:
@@ -260,37 +258,40 @@ class FedAvg(BaseFedAvg):
             if self.memory_efficient:
                 # Legacy memory-efficient mode: collect all results, then aggregate in-place
                 self.results = self.send_model_and_wait(targets=clients, data=model)
-                
+
                 self.info(f"[MEMORY-EFFICIENT MODE] Aggregating {len(self.results)} results directly into global model")
-                
+
                 # Debug: log memory state before aggregation
                 try:
                     import psutil
+
                     process = psutil.Process(os.getpid())
                     mem_before = process.memory_info().rss / 1024 / 1024
                     self.info(f"[MEMORY DEBUG] Before aggregation: {mem_before:.0f} MB")
                 except:
                     pass
-                
+
                 model = self._aggregate_inplace(target_model=model)
-                
+
                 # Debug: log memory state after aggregation
                 try:
                     mem_after_agg = process.memory_info().rss / 1024 / 1024
                     self.info(f"[MEMORY DEBUG] After aggregation: {mem_after_agg:.0f} MB")
                 except:
                     pass
-                
+
                 # Immediately clear instance variable and results list to free memory
                 self.results.clear()
                 del self.results
                 self.results = None
                 gc.collect()
-                
+
                 # Debug: log memory state after cleanup
                 try:
                     mem_after_cleanup = process.memory_info().rss / 1024 / 1024
-                    self.info(f"[MEMORY DEBUG] After cleanup: {mem_after_cleanup:.0f} MB (freed {mem_after_agg - mem_after_cleanup:.0f} MB)")
+                    self.info(
+                        f"[MEMORY DEBUG] After cleanup: {mem_after_cleanup:.0f} MB (freed {mem_after_agg - mem_after_cleanup:.0f} MB)"
+                    )
                 except:
                     pass
             else:

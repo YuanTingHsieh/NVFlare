@@ -79,7 +79,7 @@ def client_gpu_assignments(clients: List[str], gpu_ids: List[int]) -> Dict[str, 
     return gpu_assignments
 
 
-def get_service_command(cmd_type: str, prod_dir: str, service_dir, service_config: Dict) -> str:
+def get_service_command(cmd_type: str, prod_dir: str, service_dir, service_config: Dict, startup_args: str = "") -> str:
     cmd = ""
     proj_admin_dir_name = service_config.get(SC.FLARE_PROJ_ADMIN, SC.FLARE_PROJ_ADMIN)
     admin_dirs = list(service_config.get(SC.FLARE_OTHER_ADMINS, []))
@@ -91,6 +91,9 @@ def get_service_command(cmd_type: str, prod_dir: str, service_dir, service_confi
                 cmd = get_cmd_path(prod_dir, service_dir, "fl_admin.sh")
             else:
                 cmd = get_cmd_path(prod_dir, service_dir, "start.sh")
+                # Add startup args (e.g., --once) to start.sh
+                if startup_args:
+                    cmd = f"{cmd} {startup_args}"
         else:
             if service_dir in admin_dirs:
                 cmd = get_cmd_path(prod_dir, service_dir, "fl_admin.sh")
@@ -616,7 +619,7 @@ def get_service_list(cmd_args):
     return services_list
 
 
-def _start_poc(poc_workspace: str, gpu_ids: List[int], excluded=None, services_list=None):
+def _start_poc(poc_workspace: str, gpu_ids: List[int], excluded=None, services_list=None, startup_args: str = ""):
     project_config, service_config = setup_service_config(poc_workspace)
     if services_list is None:
         services_list = []
@@ -637,6 +640,7 @@ def _start_poc(poc_workspace: str, gpu_ids: List[int], excluded=None, services_l
         project_config,
         excluded=excluded,
         services_list=services_list,
+        startup_args=startup_args,
     )
 
 
@@ -717,7 +721,13 @@ def _get_clients(service_commands: list, service_config) -> List[str]:
 
 
 def _build_commands(
-    cmd_type: str, poc_workspace: str, service_config, project_config, excluded: list, services_list=None
+    cmd_type: str,
+    poc_workspace: str,
+    service_config,
+    project_config,
+    excluded: list,
+    services_list=None,
+    startup_args: str = "",
 ) -> list:
     """Builds commands.
 
@@ -727,6 +737,7 @@ def _build_commands(
         service_config (_type_): service_config
         excluded (list): excluded service/participants name
         services_list (_type_, optional): Service names. If empty, include every service/participants
+        startup_args (str, optional): Additional arguments to pass to start.sh (e.g., "--once")
 
     Returns:
         list: built commands
@@ -753,7 +764,7 @@ def _build_commands(
             for service_dir_name in fl_dirs:
                 if service_dir_name not in excluded:
                     if len(services_list) == 0 or service_dir_name in services_list:
-                        cmd = get_service_command(cmd_type, prod_dir, service_dir_name, service_config)
+                        cmd = get_service_command(cmd_type, prod_dir, service_dir_name, service_config, startup_args)
                         if cmd:
                             service_commands.append((service_dir_name, cmd))
     return _sort_service_cmds(cmd_type, service_commands, service_config)
@@ -800,10 +811,13 @@ def _run_poc(
     project_config: Dict,
     excluded: list,
     services_list=None,
+    startup_args: str = "",
 ):
     if services_list is None:
         services_list = []
-    service_commands = _build_commands(cmd_type, poc_workspace, service_config, project_config, excluded, services_list)
+    service_commands = _build_commands(
+        cmd_type, poc_workspace, service_config, project_config, excluded, services_list, startup_args
+    )
     clients = _get_clients(service_commands, service_config)
     gpu_assignments: Dict[str, List[int]] = client_gpu_assignments(clients, gpu_ids)
     for service_name, cmd_path in service_commands:

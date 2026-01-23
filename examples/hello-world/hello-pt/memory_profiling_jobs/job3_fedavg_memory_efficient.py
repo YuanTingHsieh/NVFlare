@@ -23,13 +23,13 @@ Expected memory: ~4 GB -> ~1 GB (freed as aggregated + streamed)
 Savings: ~1-2 GB compared to standard
 """
 
-from large_model_1gb import GigabyteModel
+from small_model import GigabyteModel
 
 from nvflare.app_common.workflows.fedavg import FedAvg
-from nvflare.client.config import ExchangeFormat
 from nvflare.app_opt.pt.job_config.model import PTModel
 from nvflare.app_opt.tensor_stream.client import TensorClientStreamer
 from nvflare.app_opt.tensor_stream.server import TensorServerStreamer
+from nvflare.client.config import ExchangeFormat
 from nvflare.job_config.api import FedJob
 from nvflare.job_config.script_runner import ScriptRunner
 
@@ -38,6 +38,7 @@ job = FedJob(name="job3_fedavg_memory_efficient")
 
 # Add model with persistor that keeps PyTorch tensors (no NumPy conversion)
 from nvflare.app_opt.pt.file_model_persistor import PTFileModelPersistor
+
 model = GigabyteModel()
 persistor = PTFileModelPersistor(model=model, allow_numpy_conversion=False)
 pt_model = PTModel(model=model, persistor=persistor)

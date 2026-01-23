@@ -9,7 +9,7 @@ import time
 from typing import Tuple
 
 import psutil
-from large_model import GigabyteModel
+from small_model import GigabyteModel
 
 from nvflare.apis.dxo import DataKind
 from nvflare.app_common.aggregators.intime_accumulate_model_aggregator import InTimeAccumulateWeightedAggregator
@@ -18,9 +18,9 @@ from nvflare.app_common.workflows.fedavg import FedAvg
 from nvflare.app_common.workflows.scatter_and_gather import ScatterAndGather
 from nvflare.app_opt.pt.file_model_persistor import PTFileModelPersistor
 from nvflare.app_opt.pt.job_config.model import PTModel
-from nvflare.client.config import ExchangeFormat
 from nvflare.app_opt.tensor_stream.client import TensorClientStreamer
 from nvflare.app_opt.tensor_stream.server import TensorServerStreamer
+from nvflare.client.config import ExchangeFormat
 from nvflare.job_config.api import FedJob
 from nvflare.job_config.script_runner import ScriptRunner
 from nvflare.recipe.poc_env import PocEnv
@@ -32,7 +32,7 @@ def get_model_size_gb(model) -> float:
     total_params = sum(p.numel() for p in model.parameters())
     # Assuming float32 (4 bytes per parameter)
     size_bytes = total_params * 4
-    size_gb = size_bytes / (1024 ** 3)
+    size_gb = size_bytes / (1024**3)
     return size_gb
 
 
@@ -62,77 +62,90 @@ def get_server_client_memory(poc_workspace: str = None, debug: bool = False) -> 
     client_job_mem = 0
     found_processes = []
 
-    for proc in psutil.process_iter(["pid", "name", "cmdline", "cwd"]):
-        try:
-            cmdline = proc.info.get("cmdline", [])
-            if not cmdline:
+    try:
+        for proc in psutil.process_iter(["pid", "name", "cmdline", "cwd"]):
+            try:
+                cmdline = proc.info.get("cmdline", [])
+                if not cmdline:
+                    continue
+
+                cmdline_str = " ".join(cmdline)
+                cwd = proc.info.get("cwd", "") or ""  # Handle None case
+
+                # Look for nvflare processes - be more specific
+                is_poc_process = False
+
+                # Priority 1: Check for the actual job process modules
+                if (
+                    "nvflare.private.fed.app.server.runner_process" in cmdline_str
+                    or "nvflare.private.fed.app.client.worker_process" in cmdline_str
+                ):
+                    is_poc_process = True
+                # Priority 2: Check if in POC workspace
+                elif poc_workspace and cwd and poc_workspace in cwd:
+                    is_poc_process = True
+                # Priority 3: Check for startup directory (POC processes run from startup/)
+                elif cwd and "/startup" in cwd:
+                    is_poc_process = True
+
+                if not is_poc_process:
+                    continue
+
+                found_processes.append((proc.pid, cmdline_str[:80], cwd))
+
+                if debug:
+                    print(f"Found POC process (PID {proc.pid}): {cmdline_str[:150]}")
+                    print(f"  CWD: {cwd}")
+
+                # Identify the actual job processes based on how they're started in nvflare.private
+                # From server_engine.py line 266: python -m nvflare.private.fed.app.server.runner_process
+                # From client_executor.py line 202: python -m nvflare.private.fed.app.client.worker_process
+                is_server_job = "-m" in cmdline and "nvflare.private.fed.app.server.runner_process" in cmdline_str
+                is_client_job = "-m" in cmdline and "nvflare.private.fed.app.client.worker_process" in cmdline_str
+
+                # Parent processes run from startup directories
+                # Server parent: runs from /server/startup and starts server_train
+                # Client parent: runs from /site-N/startup and starts client_train
+                is_server_parent = (
+                    ("server" in cwd and "startup" in cwd) or "server_train" in cmdline_str
+                ) and not is_server_job
+                is_client_parent = (
+                    ("site-" in cwd and "startup" in cwd) or "client_train" in cmdline_str
+                ) and not is_client_job
+
+                mem = get_process_memory(proc.pid)
+
+                # Categorize into 4 buckets
+                if is_server_job:
+                    server_job_mem += mem
+                    if debug:
+                        print(f"  -> Server JOB: {mem} MB")
+                elif is_server_parent:
+                    server_parent_mem += mem
+                    if debug:
+                        print(f"  -> Server PARENT: {mem} MB")
+                elif is_client_job:
+                    client_job_mem += mem
+                    if debug:
+                        print(f"  -> Client JOB: {mem} MB")
+                elif is_client_parent:
+                    client_parent_mem += mem
+                    if debug:
+                        print(f"  -> Client PARENT: {mem} MB")
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+            except Exception as e:
+                # Catch any other unexpected errors for individual processes
+                if debug:
+                    print(f"  Warning: Error accessing process: {e}")
                 continue
 
-            cmdline_str = " ".join(cmdline)
-            cwd = proc.info.get("cwd", "") or ""  # Handle None case
-
-            # Look for nvflare processes - be more specific
-            is_poc_process = False
-
-            # Priority 1: Check for the actual job process modules
-            if (
-                "nvflare.private.fed.app.server.runner_process" in cmdline_str
-                or "nvflare.private.fed.app.client.worker_process" in cmdline_str
-            ):
-                is_poc_process = True
-            # Priority 2: Check if in POC workspace
-            elif poc_workspace and cwd and poc_workspace in cwd:
-                is_poc_process = True
-            # Priority 3: Check for startup directory (POC processes run from startup/)
-            elif cwd and "/startup" in cwd:
-                is_poc_process = True
-
-            if not is_poc_process:
-                continue
-
-            found_processes.append((proc.pid, cmdline_str[:80], cwd))
-
-            if debug:
-                print(f"Found POC process (PID {proc.pid}): {cmdline_str[:150]}")
-                print(f"  CWD: {cwd}")
-
-            # Identify the actual job processes based on how they're started in nvflare.private
-            # From server_engine.py line 266: python -m nvflare.private.fed.app.server.runner_process
-            # From client_executor.py line 202: python -m nvflare.private.fed.app.client.worker_process
-            is_server_job = "-m" in cmdline and "nvflare.private.fed.app.server.runner_process" in cmdline_str
-            is_client_job = "-m" in cmdline and "nvflare.private.fed.app.client.worker_process" in cmdline_str
-
-            # Parent processes run from startup directories
-            # Server parent: runs from /server/startup and starts server_train
-            # Client parent: runs from /site-N/startup and starts client_train
-            is_server_parent = (
-                ("server" in cwd and "startup" in cwd) or "server_train" in cmdline_str
-            ) and not is_server_job
-            is_client_parent = (
-                ("site-" in cwd and "startup" in cwd) or "client_train" in cmdline_str
-            ) and not is_client_job
-
-            mem = get_process_memory(proc.pid)
-
-            # Categorize into 4 buckets
-            if is_server_job:
-                server_job_mem += mem
-                if debug:
-                    print(f"  -> Server JOB: {mem} MB")
-            elif is_server_parent:
-                server_parent_mem += mem
-                if debug:
-                    print(f"  -> Server PARENT: {mem} MB")
-            elif is_client_job:
-                client_job_mem += mem
-                if debug:
-                    print(f"  -> Client JOB: {mem} MB")
-            elif is_client_parent:
-                client_parent_mem += mem
-                if debug:
-                    print(f"  -> Client PARENT: {mem} MB")
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            continue
+    except Exception as e:
+        # If psutil.process_iter itself fails or other critical errors
+        if debug:
+            print(f"  Warning: Error iterating processes: {e}")
+        # Return zeros - no data available
+        return 0, 0, 0, 0, 0, 0
 
     server_total = server_parent_mem + server_job_mem
     client_total = client_parent_mem + client_job_mem
@@ -178,39 +191,55 @@ class MemoryMonitor:
             )
 
             while not self.stop_flag.is_set():
-                elapsed = time.time() - self.start_time
+                try:
+                    elapsed = time.time() - self.start_time
 
-                # Print debug info only once after processes have had time to spawn
-                debug_now = self.debug and not self.debug_printed and elapsed > 20
-                if debug_now:
-                    print("\n=== DEBUG: Process Detection (at ~20s) ===")
-                    self.debug_printed = True
+                    # Print debug info only once after processes have had time to spawn
+                    debug_now = self.debug and not self.debug_printed and elapsed > 20
+                    if debug_now:
+                        print("\n=== DEBUG: Process Detection (at ~20s) ===")
+                        self.debug_printed = True
 
-                server_parent, server_job, client_parent, client_job, server_total, client_total = (
-                    get_server_client_memory(self.poc_workspace, debug=debug_now)
-                )
-                total_mem = server_total + client_total
+                    server_parent, server_job, client_parent, client_job, server_total, client_total = (
+                        get_server_client_memory(self.poc_workspace, debug=debug_now)
+                    )
+                    total_mem = server_total + client_total
 
-                if debug_now:
-                    print(f"Total: {total_mem} MB")
-                    print("=================================\n")
+                    if debug_now:
+                        print(f"Total: {total_mem} MB")
+                        print("=================================\n")
 
-                # Track peaks
-                if total_mem > self.peak_total:
-                    self.peak_total = total_mem
-                    self.peak_server_parent = server_parent
-                    self.peak_server_job = server_job
-                    self.peak_client_parent = client_parent
-                    self.peak_client_job = client_job
-                    self.peak_server_total = server_total
-                    self.peak_client_total = client_total
-                    self.peak_time = elapsed
+                    # Track peaks
+                    if total_mem > self.peak_total:
+                        self.peak_total = total_mem
+                        self.peak_server_parent = server_parent
+                        self.peak_server_job = server_job
+                        self.peak_client_parent = client_parent
+                        self.peak_client_job = client_job
+                        self.peak_server_total = server_total
+                        self.peak_client_total = client_total
+                        self.peak_time = elapsed
 
-                # Write to file
-                f.write(
-                    f"{elapsed:.1f} {total_mem} {server_parent} {server_job} {client_parent} {client_job} {server_total} {client_total}\n"
-                )
-                f.flush()
+                    # Write to file
+                    f.write(
+                        f"{elapsed:.1f} {total_mem} {server_parent} {server_job} {client_parent} {client_job} {server_total} {client_total}\n"
+                    )
+                    f.flush()
+
+                except (psutil.NoSuchProcess, psutil.AccessDenied, ProcessLookupError) as e:
+                    # Processes may have exited - this is normal at job completion
+                    if self.debug:
+                        print(f"[Monitor] Process access error (processes may have exited): {e}")
+                    # Write zeros to indicate no processes found
+                    elapsed = time.time() - self.start_time
+                    f.write(f"{elapsed:.1f} 0 0 0 0 0 0 0\n")
+                    f.flush()
+                except Exception as e:
+                    # Unexpected error - log but continue monitoring
+                    print(f"[Monitor] Unexpected error: {e}")
+                    elapsed = time.time() - self.start_time
+                    f.write(f"{elapsed:.1f} 0 0 0 0 0 0 0\n")
+                    f.flush()
 
                 # Sleep for 200ms
                 self.stop_flag.wait(0.2)
@@ -280,9 +309,7 @@ class CustomFedAvgRecipe(Recipe):
 
         # Client script
         client_runner = ScriptRunner(
-            script="minimal_client.py",
-            script_args="",
-            server_expected_format=ExchangeFormat.PYTORCH
+            script="minimal_client.py", script_args="", server_expected_format=ExchangeFormat.PYTORCH
         )
         job.to_clients(client_runner)
 
@@ -328,9 +355,7 @@ class ScatterGatherRecipe(Recipe):
 
         # Client script
         client_runner = ScriptRunner(
-            script="minimal_client.py",
-            script_args="",
-            server_expected_format=ExchangeFormat.PYTORCH
+            script="minimal_client.py", script_args="", server_expected_format=ExchangeFormat.PYTORCH
         )
         job.to_clients(client_runner)
 
@@ -344,10 +369,9 @@ def profile_job(job_name: str, recipe: Recipe, job_num: int, n_clients: int = 1,
     print(f"Profiling: {job_name}")
     print("=" * 60)
 
-    # Create PocEnv
-    env = PocEnv(num_clients=n_clients)
+    # Create PocEnv with --once flag to disable daemon mode
+    env = PocEnv(num_clients=n_clients, use_once=True)
     poc_workspace = env.poc_workspace
-    print(f"PoC workspace: {poc_workspace}")
 
     # Start memory monitoring
     output_file = f"results/poc_job{job_num}.dat"
@@ -389,18 +413,10 @@ def profile_job(job_name: str, recipe: Recipe, job_num: int, n_clients: int = 1,
             peak_client_total,
         ) = monitor.stop()
 
-        # Clean up PocEnv
-        print("Stopping PoC environment...")
-        print("Waiting for graceful shutdown (may take up to 30 seconds)...")
-        try:
-            # Let PocEnv handle cleanup (has 30s timeout + force kill)
-            env.stop(clean_poc=True)
-        except Exception as e:
-            print(f"Warning during cleanup: {e}")
-            # Make sure workspace is removed even if stop fails
-            if os.path.exists(poc_workspace):
-                print(f"Force removing workspace: {poc_workspace}")
-                shutil.rmtree(poc_workspace, ignore_errors=True)
+        # Stop POC and clean up workspace
+        print("\nCleaning up...")
+        env.stop(clean_poc=True)
+        print("Cleanup complete")
 
         return (
             peak_total,
@@ -488,6 +504,10 @@ def main():
     print("=" * 60)
     with open("results/poc_summary.txt", "r") as f:
         print(f.read())
+
+    print("\n" + "=" * 60)
+    print("PROFILING COMPLETE")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

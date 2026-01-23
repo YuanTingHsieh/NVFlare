@@ -18,16 +18,16 @@ Job 2: Scatter and Gather (standard workflow)
 Expected memory: ~5 GB (similar to standard FedAvg - no optimization available)
 """
 
-from large_model_1gb import GigabyteModel
+from small_model import GigabyteModel
 
 from nvflare.apis.dxo import DataKind
 from nvflare.app_common.aggregators.intime_accumulate_model_aggregator import InTimeAccumulateWeightedAggregator
-from nvflare.client.config import ExchangeFormat
 from nvflare.app_common.shareablegenerators.full_model_shareable_generator import FullModelShareableGenerator
 from nvflare.app_common.workflows.scatter_and_gather import ScatterAndGather
 from nvflare.app_opt.pt.job_config.model import PTModel
 from nvflare.app_opt.tensor_stream.client import TensorClientStreamer
 from nvflare.app_opt.tensor_stream.server import TensorServerStreamer
+from nvflare.client.config import ExchangeFormat
 from nvflare.job_config.api import FedJob
 from nvflare.job_config.script_runner import ScriptRunner
 
@@ -36,6 +36,7 @@ job = FedJob(name="job2_scatter_gather")
 
 # Add model with persistor that keeps PyTorch tensors (no NumPy conversion)
 from nvflare.app_opt.pt.file_model_persistor import PTFileModelPersistor
+
 model = GigabyteModel()
 persistor = PTFileModelPersistor(model=model, allow_numpy_conversion=False)
 pt_model = PTModel(model=model, persistor=persistor)

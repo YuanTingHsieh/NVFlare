@@ -43,11 +43,12 @@ def main():
 
         print(f"[{client_name}] Sending model back to server")
         flare.send(output_model)
-        
+
         # Explicitly release references to free memory
         del input_model
         del output_model
         import gc
+
         gc.collect()
 
     print(f"[{client_name}] Complete")
