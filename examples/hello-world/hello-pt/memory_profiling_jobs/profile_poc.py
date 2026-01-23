@@ -15,6 +15,7 @@ from nvflare.apis.dxo import DataKind
 from nvflare.app_common.aggregators.intime_accumulate_model_aggregator import InTimeAccumulateWeightedAggregator
 from nvflare.app_common.shareablegenerators.full_model_shareable_generator import FullModelShareableGenerator
 from nvflare.app_common.workflows.fedavg import FedAvg
+from nvflare.app_common.workflows.fedavg_mem_efficient import FedAvgMemEfficient
 from nvflare.app_common.workflows.scatter_and_gather import ScatterAndGather
 from nvflare.app_opt.pt.file_model_persistor import PTFileModelPersistor
 from nvflare.app_opt.pt.job_config.model import PTModel
@@ -283,7 +284,7 @@ class MemoryMonitor:
 
 
 class CustomFedAvgRecipe(Recipe):
-    """Custom FedAvg Recipe with memory_efficient support."""
+    """Custom FedAvg Recipe with optional memory-efficient controller."""
 
     def __init__(self, memory_efficient: bool, n_clients: int = 1):
         # Create FedJob
@@ -295,12 +296,17 @@ class CustomFedAvgRecipe(Recipe):
         pt_model = PTModel(model=model, persistor=persistor)
         job.to_server(pt_model)
 
-        # Controller with memory_efficient flag
-        controller = FedAvg(
-            num_clients=n_clients,
-            num_rounds=3,
-            memory_efficient=memory_efficient,
-        )
+        # Use FedAvgMemEfficient if requested, otherwise standard FedAvg
+        if memory_efficient:
+            controller = FedAvgMemEfficient(
+                num_clients=n_clients,
+                num_rounds=3,
+            )
+        else:
+            controller = FedAvg(
+                num_clients=n_clients,
+                num_rounds=3,
+            )
         job.to_server(controller, id="controller")
 
         # Add tensor streaming
