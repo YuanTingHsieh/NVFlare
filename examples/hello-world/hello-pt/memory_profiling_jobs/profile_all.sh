@@ -1,16 +1,15 @@
 #!/bin/bash
-# Profile all 3 jobs and compare memory usage
+# Profile all 2 jobs and compare memory usage
 
 set -euo pipefail
 
 INTERVAL=0.2  # Sample every 200ms
 
 echo "========================================"
-echo "Memory Profiling: 3-Way Comparison"
+echo "Memory Profiling: 2-Way Comparison"
 echo "========================================"
 echo "Job 1: FedAvg (standard)"
 echo "Job 2: Scatter and Gather"
-echo "Job 3: FedAvg (memory-efficient)"
 echo ""
 echo "Clients: 1"
 echo "Rounds: 3"
@@ -165,11 +164,6 @@ echo "Job 2: Scatter and Gather" | tee -a results/summary.txt
 echo "=========================" | tee -a results/summary.txt
 PEAK2=$(profile_job 2 "Scatter and Gather" "job2_scatter_gather.py")
 
-sleep 2
-
-echo "Job 3: FedAvg (Memory-Efficient)" | tee -a results/summary.txt
-echo "================================" | tee -a results/summary.txt
-PEAK3=$(profile_job 3 "FedAvg (Memory-Efficient)" "job3_fedavg_memory_efficient.py")
 
 # # Final comparison
 # echo "========================================"  | tee -a results/summary.txt
@@ -177,12 +171,11 @@ PEAK3=$(profile_job 3 "FedAvg (Memory-Efficient)" "job3_fedavg_memory_efficient.
 # echo "========================================"  | tee -a results/summary.txt
 # echo "Job 1 (FedAvg Standard):        ${PEAK1} MB" | tee -a results/summary.txt
 # echo "Job 2 (Scatter and Gather):     ${PEAK2} MB" | tee -a results/summary.txt
-# echo "Job 3 (FedAvg Memory-Efficient): ${PEAK3} MB" | tee -a results/summary.txt
 # echo | tee -a results/summary.txt
 
 # # Calculate savings
-# SAVING_VS_STANDARD=$((PEAK1 - PEAK3))
-# SAVING_VS_SAG=$((PEAK2 - PEAK3))
+# SAVING_VS_STANDARD=$((PEAK1 - PEAK2))
+# SAVING_VS_SAG=$((PEAK2 - PEAK2))
 
 # if [ $SAVING_VS_STANDARD -gt 0 ]; then
 #     PERCENT=$(awk "BEGIN {printf \"%.1f\", ($SAVING_VS_STANDARD / $PEAK1) * 100}")
@@ -204,7 +197,7 @@ PEAK3=$(profile_job 3 "FedAvg (Memory-Efficient)" "job3_fedavg_memory_efficient.
      
 #     gnuplot <<EOF
 # set terminal png size 1400,800
-# set output 'results/memory_comparison_3way.png'
+# set output 'results/memory_comparison_2way.png'
 # set title 'Memory Usage Comparison: FedAvg vs Scatter and Gather (600MB model, 3 clients)'
 # set xlabel 'Time (seconds)'
 # set ylabel 'Memory (MB)'
@@ -213,10 +206,9 @@ PEAK3=$(profile_job 3 "FedAvg (Memory-Efficient)" "job3_fedavg_memory_efficient.
  
 # plot 'results/results_job1.dat' using 1:2 with lines lw 2 title 'Job 1: FedAvg (Standard)' linecolor rgb 'red', \
 #      'results/results_job2.dat' using 1:2 with lines lw 2 title 'Job 2: Scatter and Gather' linecolor rgb 'blue', \
-#      'results/results_job3.dat' using 1:2 with lines lw 2 title 'Job 3: FedAvg (Memory-Efficient)' linecolor rgb 'green'
 # EOF
      
-#     echo "Plot saved to: results/memory_comparison_3way.png"
+#     echo "Plot saved to: results/memory_comparison_2way.png"
 # fi
 
 # echo

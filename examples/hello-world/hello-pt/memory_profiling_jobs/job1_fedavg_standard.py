@@ -38,11 +38,11 @@ persistor = PTFileModelPersistor(model=model, allow_numpy_conversion=False)
 pt_model = PTModel(model=model, persistor=persistor)
 job.to_server(pt_model)
 
-# Add FedAvg workflow with STANDARD aggregation (memory_efficient=False)
-workflow = FedAvg(num_clients=1, num_rounds=3, memory_efficient=False)  # STANDARD MODE - more memory
+# Add FedAvg workflow
+workflow = FedAvg(num_clients=1, num_rounds=3)
 job.to_server(workflow)
 
-# Add Tensor Streaming to avoid OOM with 2.43GB model
+# Add Tensor Streaming components for chunked model transfer
 job.to_server(TensorServerStreamer(), "tensor_server_streamer")
 job.to_clients(TensorClientStreamer(), "tensor_client_streamer")
 
@@ -55,4 +55,4 @@ client_runner = ScriptRunner(
 job.to_clients(client_runner)
 
 if __name__ == "__main__":
-    job.simulator_run(workspace="/tmp/nvflare/job1_fedavg_standard", n_clients=1, log_config="full")
+    job.simulator_run(workspace="/tmp/nvflare/job1_fedavg", n_clients=1, log_config="full")

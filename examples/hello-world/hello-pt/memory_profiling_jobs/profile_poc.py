@@ -9,7 +9,7 @@ import time
 from typing import Tuple
 
 import psutil
-from medium_model import GigabyteModel
+from large_model import GigabyteModel
 
 from nvflare.apis.dxo import DataKind
 from nvflare.app_common.aggregators.intime_accumulate_model_aggregator import InTimeAccumulateWeightedAggregator
@@ -434,7 +434,7 @@ def main():
     os.makedirs("results", exist_ok=True)
 
     # Clean up old results
-    for file in ["results/poc_job1.dat", "results/poc_job2.dat", "results/poc_job3.dat", "results/poc_summary.txt"]:
+    for file in ["results/poc_job1.dat", "results/poc_job2.dat", "results/poc_summary.txt"]:
         if os.path.exists(file):
             os.remove(file)
 
@@ -448,7 +448,7 @@ def main():
     del test_model  # Free memory
 
     print("=" * 60)
-    print("Memory Profiling: 3-Way Comparison")
+    print("Memory Profiling: 2-Way Comparison")
     print("=" * 60)
     print(f"Model: {model_size_gb:.2f} GB ({total_params / 1e6:.0f}M parameters)")
     print(f"Clients: {n_clients}")
