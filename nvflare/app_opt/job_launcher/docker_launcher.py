@@ -340,11 +340,12 @@ class DockerJobLauncher(JobLauncherSpec):
         site_name = fl_ctx.get_identity_name()
         container_name = _sanitize_container_name(f"{site_name}-{job_id}")
 
-        # TODO(multi-study): when study support lands, resolve workspace from
-        # job_meta.get(JobMetaKey.STUDY) instead of using self.workspace.
-        # Each study will have its own workspace root on the host
-        # (e.g. /var/nvflare/workspaces/<study>/), and the volume mount
-        # should use that study-specific path so jobs are physically isolated.
+        # TODO(multi-study): resolve workspace per study once Phase 2 lands.
+        # study = get_job_meta_study(job_meta)  # returns DEFAULT_STUDY ("default") for legacy jobs
+        # workspace = os.path.join(self.workspace_root, study)
+        # The volume mount should use the study-specific host path so job workspaces are
+        # physically isolated across studies (e.g. /host/workspaces/study-a/, /host/workspaces/study-b/).
+        # For now self.workspace is a single root shared across all studies.
         workspace = self.workspace
 
         # Override PARENT_URL so the job container connects to SP/CP container name,
