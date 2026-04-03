@@ -163,20 +163,18 @@ participants:
     org: nvidia
     fed_learn_port: 8002
     admin_port: 8003
-    props:
-      run_in_docker: true
-      listening_host:
-        name: server
-        port: 8002
+    run_in_docker: true
+    listening_host:
+      name: server
+      port: 8002
 
   - name: site-1
     type: client
     org: nvidia
-    props:
-      run_in_docker: true
-      listening_host:
-        name: site-1
-        port: 8102
+    run_in_docker: true
+    listening_host:
+      name: site-1
+      port: 8102
 
 builders:
   - path: nvflare.lighter.impl.workspace.WorkspaceBuilder

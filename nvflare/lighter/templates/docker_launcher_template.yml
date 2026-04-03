@@ -7,6 +7,14 @@ docker_launcher_cln_sh: |
   DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
   HOST_WORKSPACE="$(cd "$DIR/.." && pwd)"
   DOCKER_IMAGE=${NVFL_P_IMAGE:-{~~docker_image~~}}
+
+  if ! docker info > /dev/null 2>&1; then
+    echo "ERROR: cannot connect to Docker daemon. Make sure your user has permission to run docker."
+    echo "  Option 1 (docker group): sudo usermod -aG docker \$USER  then log out and back in."
+    echo "  Option 2 (rootless Docker): https://docs.docker.com/engine/security/rootless/"
+    exit 1
+  fi
+
   echo "Starting NVFlare client {~~client_name~~} with image $DOCKER_IMAGE"
   echo "Host workspace: $HOST_WORKSPACE"
 
@@ -34,6 +42,14 @@ docker_launcher_svr_sh: |
   DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
   HOST_WORKSPACE="$(cd "$DIR/.." && pwd)"
   DOCKER_IMAGE=${NVFL_P_IMAGE:-{~~docker_image~~}}
+
+  if ! docker info > /dev/null 2>&1; then
+    echo "ERROR: cannot connect to Docker daemon. Make sure your user has permission to run docker."
+    echo "  Option 1 (docker group): sudo usermod -aG docker \$USER  then log out and back in."
+    echo "  Option 2 (rootless Docker): https://docs.docker.com/engine/security/rootless/"
+    exit 1
+  fi
+
   echo "Starting NVFlare server with image $DOCKER_IMAGE"
   echo "Host workspace: $HOST_WORKSPACE"
 
