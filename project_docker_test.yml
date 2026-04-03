@@ -11,7 +11,7 @@ participants:
     run_in_docker: true
     listening_host:
       name: server
-      port: 8002
+      port: 8004  # must differ from fed_learn_port and admin_port
 
   - name: site-1
     type: client
