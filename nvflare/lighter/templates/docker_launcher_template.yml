@@ -66,6 +66,5 @@ docker_launcher_svr_sh: |
     -e NVFL_DOCKER_WORKSPACE="$HOST_WORKSPACE" \
     -p {~~admin_port~~}:{~~admin_port~~} \
     -p {~~fed_learn_port~~}:{~~fed_learn_port~~} \
-    -p {~~communication_port~~}:{~~communication_port~~} \
     --rm $DOCKER_IMAGE \
     /var/nvflare/workspace/startup/sub_start.sh
