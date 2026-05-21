@@ -93,7 +93,7 @@ class AnalyticsData:
             sender (LogWriterName): Type of sender for syntax such as Tensorboard or MLflow
             kwargs (optional, dict): additional arguments to be passed.
         """
-        self._validate_data_types(data_type, key, value, **kwargs)
+        value = self._validate_data_types(data_type, key, value, **kwargs)
         self.tag = key
         self.value = value
         self.data_type = data_type
@@ -182,23 +182,62 @@ class AnalyticsData:
                 raise ValueError("expect step to be non-negative int, but got {}.".format(step))
         path = kwargs.get(TrackConst.PATH_KEY, None)
         if path and not isinstance(path, str):
-            raise TypeError("expect path to be an instance of str, but got {}.".format(type(step)))
-        if data_type in [AnalyticsDataType.SCALAR, AnalyticsDataType.METRIC] and not (
-            isinstance(value, float) or isinstance(value, int)
-        ):
-            raise TypeError(f"expect '{key}' value to be an instance of float or int, but got '{type(value)}'.")
+            raise TypeError("expect path to be an instance of str, but got {}.".format(type(path)))
+        if data_type in [AnalyticsDataType.SCALAR, AnalyticsDataType.METRIC]:
+            is_numeric_scalar, normalized_value = self._normalize_numeric_scalar(value)
+            if not is_numeric_scalar:
+                raise TypeError(f"expect '{key}' value to be an instance of float or int, but got '{type(value)}'.")
+            value = normalized_value
         elif data_type in [
             AnalyticsDataType.METRICS,
             AnalyticsDataType.PARAMETERS,
             AnalyticsDataType.SCALARS,
         ] and not isinstance(value, dict):
             raise TypeError(f"expect '{key}' value to be an instance of dict, but got '{type(value)}'.")
+        elif data_type in [AnalyticsDataType.METRICS, AnalyticsDataType.SCALARS]:
+            normalized_dict = {}
+            for k, v in value.items():
+                is_numeric_scalar, normalized_value = self._normalize_numeric_scalar(v)
+                if not is_numeric_scalar:
+                    raise TypeError(
+                        f"expect all values in '{key}' dict to be numeric scalars, "
+                        f"but got '{type(v)}' for key '{k}'."
+                    )
+                normalized_dict[k] = normalized_value
+            value = normalized_dict
         elif data_type == AnalyticsDataType.TEXT and not isinstance(value, str):
             raise TypeError(f"expect '{key}' value to be an instance of str, but got '{type(value)}'.")
         elif data_type == AnalyticsDataType.TAGS and not isinstance(value, dict):
             raise TypeError(
                 f"expect '{key}' data type expects value to be an instance of dict, but got '{type(value)}'"
             )
+        return value
+
+    @staticmethod
+    def _normalize_numeric_scalar(value):
+        if isinstance(value, (float, int)):
+            return True, value
+
+        item = getattr(value, "item", None)
+        if not callable(item):
+            return False, value
+
+        shape = getattr(value, "shape", None)
+        if shape is not None:
+            try:
+                if tuple(shape) != ():
+                    return False, value
+            except TypeError:
+                return False, value
+
+        try:
+            scalar = item()
+        except (TypeError, ValueError):
+            return False, value
+
+        if isinstance(scalar, (float, int)):
+            return True, scalar
+        return False, value
 
     @classmethod
     def convert_data_type(
