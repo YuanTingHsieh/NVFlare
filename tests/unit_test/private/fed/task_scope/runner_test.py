@@ -25,10 +25,12 @@ from nvflare.apis.shareable import ReservedHeaderKey, Shareable, make_reply
 from nvflare.apis.signal import Signal
 from nvflare.fuel.utils.fobs.decomposers.via_downloader import LazyDownloadRef
 from nvflare.private.defs import SpecialTaskName
+from nvflare.private.fed.app import job_process_cleanup
+from nvflare.private.fed.app.client import worker_process as worker
 from nvflare.private.fed.client.client_app_runner import ClientAppRunner
 from nvflare.private.fed.client.client_engine_executor_spec import TaskAssignment
 from nvflare.private.fed.client.client_runner import ClientRunner, TaskRouter
-from nvflare.private.fed.task_scope import worker
+from nvflare.private.fed.task_scope import runner as runner_module
 from nvflare.private.fed.task_scope.artifacts import read_artifact, write_artifact
 from nvflare.private.fed.task_scope.protocol import (
     ATTEMPT_OPTION,
@@ -308,67 +310,173 @@ def _attempt_args(directory, attempt, **values):
     )
 
 
-def test_worker_receipt_follows_standard_main_finally_cleanup(attempt_dir, monkeypatch):
+@pytest.fixture
+def worker_runtime(tmp_path, attempt_dir, monkeypatch):
+    """Execute canonical worker startup/finally with external runtime services stubbed."""
+    (tmp_path / "startup").mkdir()
+    (tmp_path / "local").mkdir()
+    args = SimpleNamespace(
+        workspace=str(tmp_path),
+        job_id="job-1",
+        client_name="site-1",
+        token="token",
+        token_signature="signature",
+        ssid="session",
+        set=[],
+    )
     directory, attempt = attempt_dir
-    args = _attempt_args(directory, attempt)
-    order = []
+    runtime = SimpleNamespace(
+        args=args,
+        directory=directory,
+        attempt=attempt,
+        order=[],
+        outcome={"status": TASK_COMPLETE, "task_id": "task-1"},
+    )
 
-    def run_worker(received_args, app_runner_class):
+    def record(stage):
+        # The real main must not publish until even the final process cleanup.
+        assert not list(directory.rglob(RECEIPT_FILE))
+        runtime.order.append(stage)
+
+    for name in (
+        "download_workspace",
+        "refresh_custom_dir_import_path",
+        "set_stats_pool_config_for_job",
+        "fobs_initialize",
+        "security_init_for_job",
+        "register_ext_decomposers",
+        "configure_logging",
+    ):
+        monkeypatch.setattr(worker, name, MagicMock())
+    monkeypatch.setattr(worker.ConfigService, "get_str_var", MagicMock(return_value=None))
+    monkeypatch.setattr(worker, "get_script_logger", MagicMock(return_value=MagicMock()))
+
+    federated_client = MagicMock()
+    federated_client.stop_cell.side_effect = lambda: record("cell")
+    federated_client.terminate.side_effect = lambda: record("client")
+    runtime.deployer = MagicMock()
+    runtime.deployer.create_fed_client.return_value = federated_client
+    runtime.deployer.close.side_effect = lambda: record("deployer")
+    conf = MagicMock()
+    conf.base_deployer = runtime.deployer
+    monkeypatch.setattr(worker, "FLClientStarterConfiger", MagicMock(return_value=conf))
+
+    def start_run(_root, received_args, *_args):
         assert received_args is args
-        assert app_runner_class is TaskScopedClientAppRunner
-        try:
-            args.task_scope_outcome = {"status": TASK_COMPLETE, "task_id": "task-1"}
-            order.append("run")
-        finally:
-            assert not (directory / RECEIPT_FILE).exists()
-            order.append("cleanup")
+        record("run")
+        if runtime.outcome is not None:
+            received_args.task_scope_outcome = runtime.outcome
 
-    monkeypatch.setattr(worker, "run_worker", run_worker)
-    assert worker.main(args) == 0
+    runtime.app = MagicMock()
+    runtime.app.start_run.side_effect = start_run
+    runtime.app.close.side_effect = lambda: record("commands")
+    runtime.app.wait_for_command_callbacks.side_effect = lambda timeout: record("callbacks") or True
+    runtime.default_factory = MagicMock(return_value=runtime.app)
+    runtime.scoped_factory = MagicMock(return_value=runtime.app)
+    monkeypatch.setattr(worker, "ClientAppRunner", runtime.default_factory)
+    monkeypatch.setattr(runner_module, "TaskScopedClientAppRunner", runtime.scoped_factory)
 
-    assert order == ["run", "cleanup"]
-    assert read_receipt(str(directory), attempt) == {
-        "attempt": attempt,
-        "status": TASK_COMPLETE,
-        "task_id": "task-1",
-    }
+    runtime.upload = MagicMock(side_effect=lambda *_args, **_kwargs: record("upload"))
+    monkeypatch.setattr(worker, "upload_results_on_shutdown", runtime.upload)
+    monkeypatch.setattr(
+        worker, "create_stats_pool_files_for_job", MagicMock(side_effect=lambda *_args: record("stats"))
+    )
+    monkeypatch.setattr(job_process_cleanup, "shutdown_f3_streaming", lambda: record("streaming"))
+    monkeypatch.setattr(job_process_cleanup, "security_close", lambda: record("security"))
+    thread = MagicMock()
+    thread.is_alive.return_value = True
+    thread_factory = MagicMock(return_value=thread)
 
+    def join():
+        assert thread_factory.call_args.kwargs["args"][2].is_set()
+        record("join")
 
-def test_worker_cleanup_failure_never_writes_receipt(attempt_dir, monkeypatch):
-    directory, attempt = attempt_dir
-
-    def run_worker(args, app_runner_class):
-        try:
-            args.task_scope_outcome = {"status": TASK_COMPLETE, "task_id": "task-1"}
-        finally:
-            raise RuntimeError("archive upload failed")
-
-    monkeypatch.setattr(worker, "run_worker", run_worker)
-    with pytest.raises(RuntimeError, match="archive upload failed"):
-        worker.main(_attempt_args(directory, attempt))
-
-    assert not (directory / RECEIPT_FILE).exists()
+    thread.join.side_effect = join
+    monkeypatch.setattr(worker.threading, "Thread", thread_factory)
+    return runtime
 
 
-def test_worker_does_not_reuse_stale_args_outcome(attempt_dir, monkeypatch):
-    directory, attempt = attempt_dir
-    monkeypatch.setattr(worker, "run_worker", MagicMock())
-    args = _attempt_args(directory, attempt, task_scope_outcome={"status": TASK_COMPLETE, "task_id": "old-task"})
+def _worker_scope(runtime, phase=None):
+    runtime.args.set = [
+        f"{ATTEMPT_OPTION}={runtime.attempt}",
+        f"{DIRECTORY_OPTION}={runtime.directory}",
+    ]
+    if phase is not None:
+        runtime.args.set.append(f"{PHASE_OPTION}={phase}")
+        (runtime.directory / phase).mkdir()
+    return runtime.args
 
+
+def test_default_worker_still_uses_standard_runner_and_uploads(worker_runtime):
+    runtime = worker_runtime
+    assert worker.main(runtime.args) is None
+    runtime.default_factory.assert_called_once()
+    runtime.scoped_factory.assert_not_called()
+    runtime.upload.assert_called_once()
+    assert runtime.order == [
+        "run",
+        "commands",
+        "stats",
+        "upload",
+        "streaming",
+        "cell",
+        "callbacks",
+        "security",
+        "deployer",
+        "client",
+        "join",
+    ]
+    assert not list(runtime.directory.rglob(RECEIPT_FILE))
+
+
+def test_worker_receipt_follows_standard_main_finally_cleanup(worker_runtime):
+    runtime = worker_runtime
+    assert worker.main(_worker_scope(runtime)) == 0
+    runtime.scoped_factory.assert_called_once()
+    runtime.default_factory.assert_not_called()
+    assert runtime.order == [
+        "run",
+        "commands",
+        "stats",
+        "upload",
+        "streaming",
+        "cell",
+        "callbacks",
+        "security",
+        "deployer",
+        "client",
+        "join",
+    ]
+    assert read_receipt(str(runtime.directory), runtime.attempt) == dict(runtime.outcome, attempt=runtime.attempt)
+
+
+def test_worker_does_not_reuse_stale_args_outcome(worker_runtime):
+    runtime = worker_runtime
+    runtime.outcome = None
+    args = _worker_scope(runtime)
+    args.task_scope_outcome = {"status": TASK_COMPLETE, "task_id": "old-task"}
     with pytest.raises(RuntimeError, match="without a clean runner outcome"):
         worker.main(args)
+    assert not list(runtime.directory.rglob(RECEIPT_FILE))
+    assert runtime.order[-3:] == ["deployer", "client", "join"]
 
-    assert not (directory / RECEIPT_FILE).exists()
 
-
-def test_worker_requires_attempt_environment_before_startup(monkeypatch):
-    run_worker = MagicMock()
-    monkeypatch.setattr(worker, "run_worker", run_worker)
-
-    with pytest.raises(RuntimeError, match="requires an attempt ID"):
-        worker.main(SimpleNamespace(set=[]))
-
-    run_worker.assert_not_called()
+@pytest.mark.parametrize(
+    "options",
+    [
+        [f"{ATTEMPT_OPTION}=attempt"],
+        [f"{DIRECTORY_OPTION}=/unused"],
+        [f"{PHASE_OPTION}={PULL}"],
+        [f"{ATTEMPT_OPTION}=", f"{DIRECTORY_OPTION}=/unused"],
+    ],
+)
+def test_worker_rejects_incomplete_task_scope_options_before_startup(worker_runtime, options):
+    worker_runtime.args.set = options
+    with pytest.raises((ValueError, RuntimeError), match="requires an attempt ID"):
+        worker.main(worker_runtime.args)
+    worker.download_workspace.assert_not_called()
+    worker_runtime.default_factory.assert_not_called()
+    worker_runtime.scoped_factory.assert_not_called()
 
 
 @pytest.fixture
@@ -556,54 +664,62 @@ def test_push_only_submits_persisted_payload_and_requires_ack(runner, phased, ac
 
 
 @pytest.mark.parametrize("phase,status", [(PULL, INPUT_READY), (COMPUTE, RESULT_READY), (PUSH, TASK_COMPLETE)])
-def test_phase_receipt_follows_cleanup_and_only_push_uploads_workspace(attempt_dir, monkeypatch, phase, status):
-    directory, attempt = attempt_dir
-    phase_directory = directory / phase
-    phase_directory.mkdir()
-    args = _attempt_args(directory, attempt)
-    args.set.append(f"{PHASE_OPTION}={phase}")
-
-    def run_worker(received_args, app_runner_class, *, upload_workspace_results):
-        assert upload_workspace_results is (phase == PUSH)
-        received_args.task_scope_outcome = {"status": status, "task_id": "task-1"}
-        assert not (phase_directory / RECEIPT_FILE).exists()
-
-    monkeypatch.setattr(worker, "run_worker", run_worker)
-    assert worker.main(args) == 0
-    assert read_receipt(str(phase_directory), attempt) == {
-        "attempt": attempt,
+def test_phase_receipt_follows_cleanup_and_only_push_uploads_workspace(worker_runtime, phase, status):
+    runtime = worker_runtime
+    runtime.outcome = {"status": status, "task_id": "task-1"}
+    assert worker.main(_worker_scope(runtime, phase)) == 0
+    runtime.scoped_factory.assert_called_once()
+    runtime.default_factory.assert_not_called()
+    if phase == PUSH:
+        runtime.upload.assert_called_once()
+        assert runtime.order.index("upload") < runtime.order.index("streaming")
+    else:
+        runtime.upload.assert_not_called()
+    assert runtime.order[-3:] == ["deployer", "client", "join"]
+    assert read_receipt(str(runtime.directory / phase), runtime.attempt) == {
+        "attempt": runtime.attempt,
         "phase": phase,
         "status": status,
         "task_id": "task-1",
     }
-    assert not (directory / RECEIPT_FILE).exists()
+    assert not (runtime.directory / RECEIPT_FILE).exists()
 
 
-@pytest.mark.parametrize("phase,status", [(PULL, INPUT_READY), (COMPUTE, RESULT_READY), (PUSH, TASK_COMPLETE)])
-def test_phase_cleanup_failure_withholds_receipt(attempt_dir, monkeypatch, phase, status):
-    directory, attempt = attempt_dir
-    (directory / phase).mkdir()
-    args = _attempt_args(directory, attempt)
-    args.set.append(f"{PHASE_OPTION}={phase}")
-
-    def run_worker(received_args, app_runner_class, *, upload_workspace_results):
-        received_args.task_scope_outcome = {"status": status, "task_id": "task-1"}
-        raise RuntimeError("phase cleanup failed")
-
-    monkeypatch.setattr(worker, "run_worker", run_worker)
-    with pytest.raises(RuntimeError, match="phase cleanup failed"):
-        worker.main(args)
-    assert not (directory / phase / RECEIPT_FILE).exists()
+@pytest.mark.parametrize("phase", [None, PUSH])
+def test_worker_archive_failure_withholds_receipt_and_runs_remaining_cleanup(worker_runtime, phase):
+    runtime = worker_runtime
+    runtime.upload.side_effect = RuntimeError("archive upload failed")
+    with pytest.raises(RuntimeError, match="archive upload failed"):
+        worker.main(_worker_scope(runtime, phase))
+    assert runtime.order[-6:] == ["cell", "callbacks", "security", "deployer", "client", "join"]
+    assert not list(runtime.directory.rglob(RECEIPT_FILE))
 
 
-def test_unknown_phase_is_rejected_before_any_worker_initialization(runner, phased, monkeypatch):
-    _, _, phase_args = phased
-    args = phase_args("bogus")
-    run_worker = MagicMock()
-    monkeypatch.setattr(worker, "run_worker", run_worker)
+@pytest.mark.parametrize("phase", [None, PULL, COMPUTE, PUSH])
+def test_worker_runner_failure_withholds_receipt_and_still_cleans_up(worker_runtime, phase):
+    runtime = worker_runtime
+    runtime.app.start_run.side_effect = RuntimeError("runner failed")
+    with pytest.raises(RuntimeError, match="runner failed"):
+        worker.main(_worker_scope(runtime, phase))
+    assert runtime.order[-3:] == ["deployer", "client", "join"]
+    assert not list(runtime.directory.rglob(RECEIPT_FILE))
+
+
+def test_final_worker_cleanup_failure_withholds_receipt(worker_runtime):
+    runtime = worker_runtime
+    runtime.deployer.close.side_effect = RuntimeError("deployer cleanup failed")
+    with pytest.raises(RuntimeError, match="deployer cleanup failed"):
+        worker.main(_worker_scope(runtime))
+    assert not list(runtime.directory.rglob(RECEIPT_FILE))
+
+
+def test_unknown_phase_is_rejected_before_any_worker_initialization(runner, worker_runtime):
+    args = _worker_scope(worker_runtime, "bogus")
     with pytest.raises(ValueError, match="invalid task-scope phase"):
         worker.main(args)
     with pytest.raises(ValueError, match="invalid task-scope phase"):
         runner.run("app", args)
-    run_worker.assert_not_called()
+    worker.download_workspace.assert_not_called()
+    worker_runtime.scoped_factory.assert_not_called()
+    worker_runtime.default_factory.assert_not_called()
     runner.init_run.assert_not_called()

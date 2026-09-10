@@ -20,6 +20,10 @@ builds the full CJ stack, with its own process and Slurm allocation. This retain
 D's application/runtime trust boundary; it does not isolate application code
 from Cell credentials as proposed in A/B.
 
+All phases use the existing `nvflare.private.fed.app.client.worker_process`
+entrypoint. Its `--set` options select the phase runner and receipt policy;
+there is no separate task-scope worker executable.
+
 The compute allocation must be terminal before CP submits the CPU push phase.
 Saving a local result does not mean the server has received it or completed the
 job. The logical client handle remains active through upload/ACK and idle gaps.

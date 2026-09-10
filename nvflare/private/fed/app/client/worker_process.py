@@ -32,6 +32,14 @@ from nvflare.private.fed.app.job_process_cleanup import shutdown_job_process_run
 from nvflare.private.fed.app.utils import monitor_parent_process
 from nvflare.private.fed.client.client_app_runner import ClientAppRunner
 from nvflare.private.fed.client.client_status import ClientStatus
+from nvflare.private.fed.task_scope.protocol import (
+    ATTEMPT_OPTION,
+    DIRECTORY_OPTION,
+    PHASE_OPTION,
+    PHASES,
+    PUSH,
+    write_receipt,
+)
 from nvflare.private.fed.utils.fed_utils import (
     create_stats_pool_files_for_job,
     fobs_initialize,
@@ -43,8 +51,25 @@ from nvflare.security.logging import secure_format_exception
 from nvflare.utils.job_launcher_utils import refresh_custom_dir_import_path
 
 
-def main(args, app_runner_class=ClientAppRunner, *, upload_workspace_results=True):
+def main(args):
     kv_list = parse_vars(args.set)
+    task_scoped = any(key in kv_list for key in (ATTEMPT_OPTION, DIRECTORY_OPTION, PHASE_OPTION))
+    app_runner_class = ClientAppRunner
+    upload_workspace_results = True
+    if task_scoped:
+        attempt = kv_list.get(ATTEMPT_OPTION)
+        directory = kv_list.get(DIRECTORY_OPTION)
+        if not isinstance(attempt, str) or not attempt or not isinstance(directory, str) or not directory:
+            raise RuntimeError("task-scoped worker requires an attempt ID and receipt directory")
+        phase = kv_list.get(PHASE_OPTION)
+        if phase is not None and phase not in PHASES:
+            raise ValueError(f"invalid task-scope phase: {phase}")
+        from nvflare.private.fed.task_scope.runner import TaskScopedClientAppRunner
+
+        app_runner_class = TaskScopedClientAppRunner
+        args.task_scope_outcome = None
+        # Pull/compute leave durable artifacts for the CPU push CJ to publish.
+        upload_workspace_results = phase is None or phase == PUSH
 
     # get parent process id
     parent_pid = os.getppid()
@@ -155,6 +180,18 @@ def main(args, app_runner_class=ClientAppRunner, *, upload_workspace_results=Tru
             stop_event.set()
             if thread and thread.is_alive():
                 thread.join()
+
+    if task_scoped:
+        # A phase receipt follows all normal CJ cleanup, including workspace
+        # publication for push. An exception above must withhold the receipt.
+        if args.task_scope_outcome is None:
+            raise RuntimeError("task-scoped worker finished without a clean runner outcome")
+        outcome = args.task_scope_outcome
+        if phase is not None:
+            directory = os.path.join(directory, phase)
+            outcome = dict(outcome, phase=phase)
+        write_receipt(directory, attempt, outcome)
+        return 0
 
 
 def parse_arguments():

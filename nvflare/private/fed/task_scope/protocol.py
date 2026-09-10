@@ -38,7 +38,6 @@ PHASES = (PULL, COMPUTE, PUSH)
 PHASE_OPTION = "__task_scope_phase"
 ATTEMPT_OPTION = "__task_scope_attempt"
 DIRECTORY_OPTION = "__task_scope_dir"
-WORKER_MODULE_CONTEXT_KEY = "__task_scope_worker_module"
 RECEIPT_FILE = "receipt.json"
 
 

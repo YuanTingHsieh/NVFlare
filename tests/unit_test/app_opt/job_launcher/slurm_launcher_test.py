@@ -39,7 +39,7 @@ from nvflare.app_opt.job_launcher.slurm.launcher import (
 )
 from nvflare.app_opt.job_launcher.slurm.manager import _job_key
 from nvflare.app_opt.job_launcher.study_runtime import SecretEnvRef, StudyRuntime
-from nvflare.private.fed.task_scope.protocol import COMPUTE, PHASE_OPTION, PULL, PUSH, WORKER_MODULE_CONTEXT_KEY
+from nvflare.private.fed.task_scope.protocol import ATTEMPT_OPTION, COMPUTE, DIRECTORY_OPTION, PHASE_OPTION, PULL, PUSH
 
 
 def _workspace(tmp_path):
@@ -478,20 +478,23 @@ def test_launch_plan_uses_fixed_worker_and_one_resolved_job_spec(tmp_path):
     assert plan.resources.nodes == 1
 
 
-def test_launch_plan_accepts_only_private_runtime_worker_override(tmp_path):
+@pytest.mark.parametrize("phase", [PULL, COMPUTE, PUSH])
+def test_phased_launch_plan_keeps_canonical_worker_with_phase_arguments(tmp_path, phase):
     workspace = _workspace(tmp_path)
     launcher = _launcher(tmp_path, workspace)
     fl_ctx = _fl_ctx(workspace, module="job.cannot.override.worker")
-    fl_ctx.set_prop(
-        WORKER_MODULE_CONTEXT_KEY,
-        "nvflare.private.fed.task_scope.worker",
-        private=True,
-        sticky=False,
+    fl_ctx.get_prop(FLContextKey.JOB_PROCESS_ARGS)[JobProcessArgs.OPTIONS] = (
+        "--set",
+        f"{ATTEMPT_OPTION}=attempt-1 {DIRECTORY_OPTION}={workspace} {PHASE_OPTION}={phase}",
     )
+    fl_ctx.set_prop(PHASE_OPTION, phase, private=True, sticky=False)
 
     plan = launcher._build_launch_plan({JobConstants.JOB_ID: "job-1"}, fl_ctx)
 
-    assert plan.exe_module == "nvflare.private.fed.task_scope.worker"
+    assert plan.exe_module == ClientSlurmJobLauncher.EXE_MODULE
+    assert f"{ATTEMPT_OPTION}=attempt-1" in plan.module_args
+    assert f"{DIRECTORY_OPTION}={workspace}" in plan.module_args
+    assert f"{PHASE_OPTION}={phase}" in plan.module_args
 
 
 def _multinode_meta(

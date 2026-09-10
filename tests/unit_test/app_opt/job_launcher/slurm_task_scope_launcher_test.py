@@ -49,7 +49,6 @@ from nvflare.private.fed.task_scope.protocol import (
     TASK_TOKEN,
     TERMINAL_TOPIC,
     WAIT,
-    WORKER_MODULE_CONTEXT_KEY,
     write_receipt,
 )
 
@@ -526,7 +525,6 @@ def test_task_scoped_mode_reuses_physical_slurm_launch_and_restores_common_boots
             raise AssertionError("successful physical allocation must not be terminated")
 
     def physical_launch(_launcher, _job_meta, received_ctx):
-        assert received_ctx.get_prop(WORKER_MODULE_CONTEXT_KEY) == "nvflare.private.fed.task_scope.worker"
         launches.append(dict(received_ctx.get_prop(FLContextKey.JOB_PROCESS_ARGS)))
         return Allocation()
 
@@ -538,7 +536,6 @@ def test_task_scoped_mode_reuses_physical_slurm_launch_and_restores_common_boots
     assert len(launches) == 1
     assert launches[0][JobProcessArgs.EXE_MODULE][1] == ClientSlurmJobLauncher.EXE_MODULE
     assert fl_ctx.get_prop(FLContextKey.JOB_PROCESS_ARGS) is original_args
-    assert fl_ctx.get_prop(WORKER_MODULE_CONTEXT_KEY) is None
 
 
 def test_launcher_rejects_duplicate_logical_job_without_submitting(tmp_path):

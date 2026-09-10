@@ -51,7 +51,6 @@ from nvflare.private.fed.task_scope.protocol import (
     TASK_TOKEN,
     TERMINAL_TOPIC,
     WAIT,
-    WORKER_MODULE_CONTEXT_KEY,
     read_receipt,
 )
 from nvflare.private.fed.utils.fed_utils import get_return_code
@@ -72,17 +71,14 @@ def launch_task_scope_worker(physical_launch, fl_ctx, attempt, directory, phase=
             raise ValueError("invalid task phase")
         additions += f" {PHASE_OPTION}={phase}"
     scoped[JobProcessArgs.OPTIONS] = (option, f"{value} {additions}".strip())
-    original_worker_module = fl_ctx.get_prop(WORKER_MODULE_CONTEXT_KEY)
     original_phase = fl_ctx.get_prop(PHASE_OPTION)
     fl_ctx.set_prop(FLContextKey.JOB_PROCESS_ARGS, scoped, private=True, sticky=False)
-    fl_ctx.set_prop(WORKER_MODULE_CONTEXT_KEY, "nvflare.private.fed.task_scope.worker", private=True, sticky=False)
     if phase is not None:
         fl_ctx.set_prop(PHASE_OPTION, phase, private=True, sticky=False)
     try:
         return physical_launch()
     finally:
         fl_ctx.set_prop(FLContextKey.JOB_PROCESS_ARGS, job_args, private=True, sticky=False)
-        fl_ctx.set_prop(WORKER_MODULE_CONTEXT_KEY, original_worker_module, private=True, sticky=False)
         if phase is not None:
             fl_ctx.set_prop(PHASE_OPTION, original_phase, private=True, sticky=False)
 

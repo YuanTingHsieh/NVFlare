@@ -49,20 +49,22 @@ from nvflare.private.fed.task_scope.protocol import (
     TASK_COMPLETE,
     TASK_TOKEN,
     TERMINAL_TOPIC,
-    WORKER_MODULE_CONTEXT_KEY,
     write_receipt,
 )
 
 
 def test_common_worker_bootstrap_is_attempt_scoped_and_restored_on_launch_failure(tmp_path):
     fl_ctx = FLContext()
-    original = {JobProcessArgs.OPTIONS: ("--set", "existing=value")}
+    original = {
+        JobProcessArgs.EXE_MODULE: ("-m", "nvflare.private.fed.app.client.worker_process"),
+        JobProcessArgs.OPTIONS: ("--set", "existing=value"),
+    }
     fl_ctx.set_prop(FLContextKey.JOB_PROCESS_ARGS, original, private=True, sticky=False)
     directory = tmp_path / "directory with spaces"
 
     def fail():
-        assert fl_ctx.get_prop(WORKER_MODULE_CONTEXT_KEY) == "nvflare.private.fed.task_scope.worker"
         args = fl_ctx.get_prop(FLContextKey.JOB_PROCESS_ARGS)
+        assert args[JobProcessArgs.EXE_MODULE] == original[JobProcessArgs.EXE_MODULE]
         options = dict(token.split("=", 1) for token in shlex.split(args[JobProcessArgs.OPTIONS][1]))
         assert options == {
             "existing": "value",
@@ -74,7 +76,6 @@ def test_common_worker_bootstrap_is_attempt_scoped_and_restored_on_launch_failur
     with pytest.raises(RuntimeError, match="physical launch failed"):
         launch_task_scope_worker(fail, fl_ctx, "attempt-1", str(directory))
     assert fl_ctx.get_prop(FLContextKey.JOB_PROCESS_ARGS) is original
-    assert fl_ctx.get_prop(WORKER_MODULE_CONTEXT_KEY) is None
 
 
 def test_attempts_settle_and_publish_receipts_before_relaunch(tmp_path):
@@ -218,16 +219,28 @@ def test_cancel_after_local_result_stops_before_push_and_never_claims_success(tm
     assert [a.phase for a in allocations] == [PULL, COMPUTE]
 
 
-def test_phase_bootstrap_is_local_to_the_physical_launch(tmp_path):
+@pytest.mark.parametrize("phase", PHASES)
+def test_phase_bootstrap_is_local_to_the_physical_launch(tmp_path, phase):
     ctx = FLContext()
-    original = {JobProcessArgs.OPTIONS: ("--set", "existing=value")}
+    original = {
+        JobProcessArgs.EXE_MODULE: ("-m", "nvflare.private.fed.app.client.worker_process"),
+        JobProcessArgs.OPTIONS: ("--set", "existing=value"),
+    }
     ctx.set_prop(FLContextKey.JOB_PROCESS_ARGS, original, private=True, sticky=False)
 
     def inspect():
-        assert ctx.get_prop(PHASE_OPTION) == PUSH
-        assert f"{PHASE_OPTION}={PUSH}" in ctx.get_prop(FLContextKey.JOB_PROCESS_ARGS)[JobProcessArgs.OPTIONS][1]
+        assert ctx.get_prop(PHASE_OPTION) == phase
+        args = ctx.get_prop(FLContextKey.JOB_PROCESS_ARGS)
+        assert args[JobProcessArgs.EXE_MODULE] == original[JobProcessArgs.EXE_MODULE]
+        options = dict(token.split("=", 1) for token in shlex.split(args[JobProcessArgs.OPTIONS][1]))
+        assert options == {
+            "existing": "value",
+            ATTEMPT_OPTION: "attempt-1",
+            DIRECTORY_OPTION: str(tmp_path),
+            PHASE_OPTION: phase,
+        }
 
-    launch_task_scope_worker(inspect, ctx, "attempt-1", str(tmp_path), PUSH)
+    launch_task_scope_worker(inspect, ctx, "attempt-1", str(tmp_path), phase)
     assert ctx.get_prop(PHASE_OPTION) is None
     assert ctx.get_prop(FLContextKey.JOB_PROCESS_ARGS) is original
 

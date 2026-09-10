@@ -65,7 +65,7 @@ from nvflare.fuel.f3.drivers.file_driver import parse_file_url
 from nvflare.fuel.utils.config_service import ConfigService
 from nvflare.fuel.utils.secret_utils import has_secret_refs
 from nvflare.private.fed.task_scope.launcher import TaskScopedJobLauncherMixin
-from nvflare.private.fed.task_scope.protocol import PHASE_OPTION, PULL, PUSH, WORKER_MODULE_CONTEXT_KEY
+from nvflare.private.fed.task_scope.protocol import PHASE_OPTION, PULL, PUSH
 from nvflare.utils.job_launcher_utils import (
     get_client_job_args,
     get_credential_env,
@@ -515,7 +515,7 @@ class SlurmJobLauncher(JobLauncherSpec):
             job_id=job_id,
             site_name=site_name,
             run_dir=run_dir,
-            exe_module=fl_ctx.get_prop(WORKER_MODULE_CONTEXT_KEY) or self.EXE_MODULE,
+            exe_module=self.EXE_MODULE,
             module_args=self.get_module_args(job_args),
             resources=resources,
             directives=directives,
