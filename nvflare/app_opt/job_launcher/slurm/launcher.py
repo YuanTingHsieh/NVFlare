@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import shlex
 from abc import abstractmethod
+from dataclasses import replace
 from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -64,7 +65,7 @@ from nvflare.fuel.f3.drivers.file_driver import parse_file_url
 from nvflare.fuel.utils.config_service import ConfigService
 from nvflare.fuel.utils.secret_utils import has_secret_refs
 from nvflare.private.fed.task_scope.launcher import TaskScopedJobLauncherMixin
-from nvflare.private.fed.task_scope.protocol import WORKER_MODULE_CONTEXT_KEY
+from nvflare.private.fed.task_scope.protocol import PHASE_OPTION, PULL, PUSH, WORKER_MODULE_CONTEXT_KEY
 from nvflare.utils.job_launcher_utils import (
     get_client_job_args,
     get_credential_env,
@@ -552,6 +553,18 @@ class ClientSlurmJobLauncher(TaskScopedJobLauncherMixin, SlurmJobLauncher):
     EXE_MODULE = "nvflare.private.fed.app.client.worker_process"
     SUPPORTS_ADDITIONAL_NODE_COMMAND = True
     SUPPORTS_CLIENT_API_ATTACH = True
+
+    def _build_launch_plan(self, job_meta, fl_ctx):
+        plan = super()._build_launch_plan(job_meta, fl_ctx)
+        if self.task_phased and fl_ctx.get_prop(PHASE_OPTION) in (PULL, PUSH):
+            # Transfer CJs retain the job's CPU/memory requirements, but must
+            # neither reserve GPUs nor discover unallocated devices on the node.
+            plan = replace(
+                plan,
+                resources=replace(plan.resources, gpus_per_node=None),
+                study_env=dict(plan.study_env, CUDA_VISIBLE_DEVICES="", ROCR_VISIBLE_DEVICES=""),
+            )
+        return plan
 
     def _prepare_task_scoped_job(self, job_meta, fl_ctx):
         if self.manager is None:

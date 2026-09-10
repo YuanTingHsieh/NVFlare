@@ -13,11 +13,16 @@
 # limitations under the License.
 """Example export and real Python-process checkpoint tests; not Slurm/CJ E2E."""
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+from nvflare.apis.fl_context import FLContext
+from nvflare.apis.shareable import Shareable
 
 ROOT = Path(__file__).resolve().parents[4]
 EXAMPLE = ROOT / "examples" / "advanced" / "slurm-task-scope"
@@ -42,6 +47,21 @@ print(json.dumps(dict(result)))
 
 def _environment():
     return dict(os.environ, PYTHONPATH=str(ROOT))
+
+
+def test_controller_records_result_data_without_runtime_peer_headers():
+    spec = importlib.util.spec_from_file_location("counter_components", EXAMPLE / "components.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    controller = module.GapController()
+    payload = {"round": 0, "value": 1, "pid": 123, "slurm_id": "42", "finished_at": 1.0}
+    result = Shareable(payload)
+    result.set_header("__peer_ctx__", FLContext())
+    client_task = SimpleNamespace(
+        result=result, task=SimpleNamespace(data={"round": 0}), client=SimpleNamespace(name="site-1")
+    )
+    controller._receive(client_task, FLContext())
+    assert json.loads(json.dumps(controller.results)) == {"0": {"site-1": payload}}
 
 
 def _count(workspace, round_number, crash_round=-1):

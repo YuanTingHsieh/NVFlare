@@ -29,6 +29,13 @@ ERROR = "ERROR"
 TASK_COMPLETE = "TASK_COMPLETE"
 IDLE = "IDLE"
 END_RUN = "END_RUN"
+INPUT_READY = "INPUT_READY"
+RESULT_READY = "RESULT_READY"
+PULL = "pull"
+COMPUTE = "compute"
+PUSH = "push"
+PHASES = (PULL, COMPUTE, PUSH)
+PHASE_OPTION = "__task_scope_phase"
 ATTEMPT_OPTION = "__task_scope_attempt"
 DIRECTORY_OPTION = "__task_scope_dir"
 WORKER_MODULE_CONTEXT_KEY = "__task_scope_worker_module"
@@ -38,18 +45,26 @@ RECEIPT_FILE = "receipt.json"
 def _validate_receipt(receipt, attempt):
     if not isinstance(receipt, dict) or receipt.get("attempt") != attempt:
         raise ValueError("missing or stale task-scope receipt")
-    if receipt.get(STATUS) not in (TASK_COMPLETE, IDLE, END_RUN):
+    if receipt.get(STATUS) not in (TASK_COMPLETE, INPUT_READY, RESULT_READY, IDLE, END_RUN):
         raise ValueError("invalid task-scope receipt status")
-    if receipt[STATUS] == TASK_COMPLETE and not receipt.get("task_id"):
-        raise ValueError("completed task receipt requires a task ID")
+    if receipt[STATUS] in (TASK_COMPLETE, INPUT_READY, RESULT_READY):
+        if not isinstance(receipt.get("task_id"), str) or not receipt["task_id"]:
+            raise ValueError("completed task receipt requires a task ID")
+    if receipt[STATUS] in (INPUT_READY, RESULT_READY) and "phase" not in receipt:
+        raise ValueError("local handoff receipt requires a phase")
+    if "phase" in receipt:
+        allowed = {PULL: (INPUT_READY, IDLE, END_RUN), COMPUTE: (RESULT_READY,), PUSH: (TASK_COMPLETE,)}
+        if receipt.get("phase") not in allowed or receipt[STATUS] not in allowed[receipt["phase"]]:
+            raise ValueError("receipt status does not match its phase")
     return receipt
 
 
 def write_receipt(directory, attempt, outcome):
     """Write once, after worker shutdown. The parent reads only after allocation exit.
 
-    This records the existing task-submit ACK, NOT a new durable server commit.
-    A partial write is never sufficient for recycling the worker.
+    INPUT_READY/RESULT_READY attest a local phase handoff. Only TASK_COMPLETE
+    records the existing task-submit ACK, not a new durable server commit.
+    A partial write is never sufficient for advancing the phase or task.
     """
     receipt = _validate_receipt(dict(outcome, attempt=attempt), attempt)
     path = os.path.join(directory, RECEIPT_FILE)

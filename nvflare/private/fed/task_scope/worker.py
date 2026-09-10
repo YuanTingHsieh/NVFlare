@@ -20,7 +20,15 @@ from nvflare.fuel.f3.mpm import MainProcessMonitor
 from nvflare.fuel.utils.argument_utils import parse_vars
 from nvflare.private.fed.app.client.worker_process import main as run_worker
 from nvflare.private.fed.app.client.worker_process import parse_arguments
-from nvflare.private.fed.task_scope.protocol import ATTEMPT_OPTION, DIRECTORY_OPTION, write_receipt
+from nvflare.private.fed.task_scope.protocol import (
+    ATTEMPT_OPTION,
+    COMPUTE,
+    DIRECTORY_OPTION,
+    PHASE_OPTION,
+    PULL,
+    PUSH,
+    write_receipt,
+)
 from nvflare.private.fed.task_scope.runner import TaskScopedClientAppRunner
 
 
@@ -30,15 +38,27 @@ def main(args):
     directory = options.get(DIRECTORY_OPTION)
     if not attempt or not directory:
         raise RuntimeError("experimental task-scoped worker requires an attempt ID and receipt directory")
+    phase = options.get(PHASE_OPTION)
+    if phase is not None and phase not in (PULL, COMPUTE, PUSH):
+        raise ValueError(f"invalid task-scope phase: {phase}")
 
     args.task_scope_outcome = None
-    run_worker(args, app_runner_class=TaskScopedClientAppRunner)
+    if phase is None:
+        run_worker(args, app_runner_class=TaskScopedClientAppRunner)
+    else:
+        # The shared filesystem carries pull/compute artifacts to the next CJ.
+        # Only the CPU push allocation uploads the workspace on shutdown.
+        run_worker(args, app_runner_class=TaskScopedClientAppRunner, upload_workspace_results=phase == PUSH)
     # The standard main returns only after its finally block has completed:
-    # command/streaming shutdown, archive upload, cell/security/deployer cleanup,
+    # command/streaming shutdown, configured archive upload, cell/security/deployer cleanup,
     # client termination, and parent-monitor join. Never publish earlier.
     if args.task_scope_outcome is None:
         raise RuntimeError("task-scoped worker finished without a clean runner outcome")
-    write_receipt(directory, attempt, args.task_scope_outcome)
+    outcome = args.task_scope_outcome
+    if phase is not None:
+        directory = os.path.join(directory, phase)
+        outcome = dict(outcome, phase=phase)
+    write_receipt(directory, attempt, outcome)
     return 0
 
 

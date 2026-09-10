@@ -18,10 +18,15 @@ import json
 import pytest
 
 from nvflare.private.fed.task_scope.protocol import (
+    COMPUTE,
     END_RUN,
     ERROR,
     IDLE,
+    INPUT_READY,
+    PULL,
+    PUSH,
     RECEIPT_FILE,
+    RESULT_READY,
     STATUS,
     TASK_COMPLETE,
     read_receipt,
@@ -58,3 +63,24 @@ def test_receipt_rejects_partial_json_and_symlink(tmp_path):
     path.symlink_to(target)
     with pytest.raises(ValueError, match="symlink"):
         read_receipt(str(tmp_path), "attempt-1")
+
+
+@pytest.mark.parametrize("phase,status", [(PULL, INPUT_READY), (COMPUTE, RESULT_READY), (PUSH, TASK_COMPLETE)])
+def test_phase_receipts_preserve_phase_identity(tmp_path, phase, status):
+    outcome = {STATUS: status, "task_id": "task-1", "phase": phase}
+    write_receipt(str(tmp_path), "attempt-1", outcome)
+    assert read_receipt(str(tmp_path), "attempt-1") == dict(outcome, attempt="attempt-1")
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        {STATUS: INPUT_READY, "task_id": "task-1"},
+        {STATUS: RESULT_READY, "task_id": "task-1", "phase": PUSH},
+        {STATUS: TASK_COMPLETE, "task_id": "task-1", "phase": COMPUTE},
+        {STATUS: TASK_COMPLETE, "task_id": {"invalid": "type"}},
+    ],
+)
+def test_local_handoff_cannot_masquerade_as_published_result(tmp_path, outcome):
+    with pytest.raises(ValueError):
+        write_receipt(str(tmp_path), "attempt-1", outcome)

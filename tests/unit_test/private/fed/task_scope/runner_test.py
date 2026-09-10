@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nvflare.apis.event_type import EventType
-from nvflare.apis.fl_constant import ReturnCode
+from nvflare.apis.fl_constant import FilterKey, FLContextKey, ReturnCode
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.shareable import ReservedHeaderKey, Shareable, make_reply
 from nvflare.apis.signal import Signal
@@ -29,16 +29,24 @@ from nvflare.private.fed.client.client_app_runner import ClientAppRunner
 from nvflare.private.fed.client.client_engine_executor_spec import TaskAssignment
 from nvflare.private.fed.client.client_runner import ClientRunner, TaskRouter
 from nvflare.private.fed.task_scope import worker
+from nvflare.private.fed.task_scope.artifacts import read_artifact, write_artifact
 from nvflare.private.fed.task_scope.protocol import (
     ATTEMPT_OPTION,
+    COMPUTE,
     DIRECTORY_OPTION,
     END_RUN,
     IDLE,
+    INPUT_READY,
+    PHASE_OPTION,
+    PULL,
+    PUSH,
     RECEIPT_FILE,
+    RESULT_READY,
     TASK_COMPLETE,
     read_receipt,
 )
 from nvflare.private.fed.task_scope.runner import TaskScopedClientAppRunner, TaskScopedClientRunner
+from nvflare.private.fed.utils.fed_utils import fobs_initialize
 
 
 def _task(name="train", task_id="task-1"):
@@ -361,3 +369,241 @@ def test_worker_requires_attempt_environment_before_startup(monkeypatch):
         worker.main(SimpleNamespace(set=[]))
 
     run_worker.assert_not_called()
+
+
+@pytest.fixture
+def phased(runner, attempt_dir):
+    fobs_initialize()
+    directory, attempt = attempt_dir
+    runner.job_id = "job-1"
+    fl_ctx = runner.engine.new_context.return_value.__enter__.return_value
+    peer_ctx = FLContext()
+    peer_ctx.set_prop(FLContextKey.CURRENT_RUN, runner.job_id, private=False)
+    peer_ctx.set_prop("round", 3, private=False)
+    fl_ctx.set_peer_context(peer_ctx)
+    task = runner.engine.get_task_assignment.return_value
+    task.data["weight"] = 2
+    task.data.add_cookie("round", 3)
+    task.data.set_peer_context(peer_ctx)
+    task.data.set_peer_props(peer_ctx.get_all_public_props())
+
+    def phase_args(phase):
+        args = _attempt_args(directory, attempt)
+        args.set.append(f"{PHASE_OPTION}={phase}")
+        return args
+
+    return directory, attempt, phase_args
+
+
+def test_pull_persists_full_input_context_without_executing_or_submitting(runner, phased):
+    directory, attempt, phase_args = phased
+    args = phase_args(PULL)
+    runner.run("app", args)
+
+    artifact = read_artifact(str(directory), attempt, runner.job_id, "input")
+    assert artifact["data"]["weight"] == 2
+    assert artifact["data"].get_cookie("round") == 3
+    assert artifact["data"].get_peer_context().get_job_id() == runner.job_id
+    assert artifact["data"].get_peer_props()["round"] == 3
+    assert args.task_scope_outcome == {"status": INPUT_READY, "task_id": "task-1"}
+    runner._process_task.assert_not_called()
+    runner._send_task_result.assert_not_called()
+
+
+@pytest.mark.parametrize("peer_job", [None, "another-job"])
+def test_pull_cannot_commit_input_without_matching_server_context(runner, phased, peer_job):
+    directory, _, phase_args = phased
+    fl_ctx = runner.engine.new_context.return_value.__enter__.return_value
+    if peer_job is None:
+        fl_ctx.set_peer_context(None)
+    else:
+        fl_ctx.get_peer_context().set_prop(FLContextKey.CURRENT_RUN, peer_job, private=False)
+
+    with pytest.raises(RuntimeError, match="client execution failed"):
+        runner.run("app", phase_args(PULL))
+    assert not (directory / "input.json").exists()
+
+
+def test_compute_restores_context_runs_filters_and_commits_before_any_submission(runner, phased):
+    directory, attempt, phase_args = phased
+    task = runner.engine.get_task_assignment.return_value
+    write_artifact(str(directory), attempt, runner.job_id, "input", task.name, task.task_id, task.data)
+    fl_ctx = runner.engine.new_context.return_value.__enter__.return_value
+    fl_ctx.set_peer_context(None)
+    order = []
+
+    def filter_input(data, context):
+        assert context.get_peer_context().get_job_id() == runner.job_id
+        assert context.get_peer_context().get_prop("round") == 3
+        order.append("input_filter")
+        data["weight"] += 1
+        return data
+
+    def execute(name, data, context, abort_signal):
+        order.append("execute")
+        assert name == "train"
+        assert data["weight"] == 3
+        return Shareable({"weight": data["weight"] * 2})
+
+    def filter_result(data, context):
+        order.append("result_filter")
+        data["weight"] += 1
+        return data
+
+    runner.task_router.task_table["train"].execute = execute
+    runner.task_data_filters = {f"train{FilterKey.DELIMITER}{FilterKey.IN}": [SimpleNamespace(process=filter_input)]}
+    runner.task_result_filters = {
+        f"train{FilterKey.DELIMITER}{FilterKey.OUT}": [SimpleNamespace(process=filter_result)]
+    }
+    runner.fire_event_with_data = lambda event, ctx, key, value: ctx.set_prop(key, value, private=True, sticky=False)
+    runner._process_task = ClientRunner._process_task.__get__(runner)
+    args = phase_args(COMPUTE)
+    runner.run("app", args)
+
+    result = read_artifact(str(directory), attempt, runner.job_id, "result")["data"]
+    assert result["weight"] == 7
+    assert result.get_cookie("round") == 3
+    assert result.get_header(ReservedHeaderKey.TASK_ID) == "task-1"
+    assert result.get_header(ReservedHeaderKey.TASK_NAME) == "train"
+    assert order == ["input_filter", "execute", "result_filter"]
+    assert EventType.BEFORE_SEND_TASK_RESULT not in [call.args[0] for call in runner.fire_event.call_args_list]
+    assert args.task_scope_outcome == {"status": RESULT_READY, "task_id": "task-1"}
+    runner.engine.get_task_assignment.assert_not_called()
+    runner._send_task_result.assert_not_called()
+    runner.engine.send_task_result.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["exception", "failed_result", "lazy_result", "pass_through"])
+def test_compute_failure_never_commits_result_or_submits(runner, phased, failure):
+    directory, attempt, phase_args = phased
+    task = runner.engine.get_task_assignment.return_value
+    write_artifact(str(directory), attempt, runner.job_id, "input", task.name, task.task_id, task.data)
+    if failure == "exception":
+        runner._process_task.side_effect = RuntimeError("trainer failed")
+    elif failure == "failed_result":
+        runner._process_task.return_value = make_reply(ReturnCode.EXECUTION_EXCEPTION)
+    elif failure == "lazy_result":
+        runner._process_task.return_value = Shareable({"weights": LazyDownloadRef("source", "download", "ref")})
+    else:
+        runner._process_task.return_value.set_header(ReservedHeaderKey.PASS_THROUGH, True)
+
+    args = phase_args(COMPUTE)
+    with pytest.raises(RuntimeError, match="client execution failed"):
+        runner.run("app", args)
+    assert args.task_scope_outcome is None
+    assert not (directory / "result.json").exists()
+    runner.engine.get_task_assignment.assert_not_called()
+    runner._send_task_result.assert_not_called()
+
+
+def test_pull_rejects_lazy_input_instead_of_committing_live_source_dependency(runner, phased):
+    directory, _, phase_args = phased
+    runner.engine.get_task_assignment.return_value.data["weight"] = LazyDownloadRef("source", "download", "ref")
+    args = phase_args(PULL)
+    with pytest.raises(RuntimeError, match="client execution failed"):
+        runner.run("app", args)
+    assert not (directory / "input.json").exists()
+    assert args.task_scope_outcome is None
+    runner._process_task.assert_not_called()
+
+
+@pytest.mark.parametrize("phase,kind", [(COMPUTE, "input"), (PUSH, "result")])
+def test_missing_handoff_fails_without_fetching_another_task(runner, phased, phase, kind):
+    _, _, phase_args = phased
+    args = phase_args(phase)
+    with pytest.raises(RuntimeError, match="client execution failed") as error:
+        runner.run("app", args)
+    assert isinstance(error.value.__cause__, FileNotFoundError)
+    assert args.task_scope_outcome is None
+    runner.engine.get_task_assignment.assert_not_called()
+    runner._process_task.assert_not_called()
+    runner._send_task_result.assert_not_called()
+
+
+@pytest.mark.parametrize("ack", [False, True])
+def test_push_only_submits_persisted_payload_and_requires_ack(runner, phased, ack):
+    directory, attempt, phase_args = phased
+    result = Shareable({"weight": 7})
+    result.set_header(ReservedHeaderKey.TASK_NAME, "train")
+    result.set_header(ReservedHeaderKey.TASK_ID, "task-1")
+    write_artifact(str(directory), attempt, runner.job_id, "result", "train", "task-1", result)
+
+    def submit(data, task_id, context):
+        assert data["weight"] == 7
+        assert task_id == context.get_prop(FLContextKey.TASK_ID) == "task-1"
+        assert context.get_prop(FLContextKey.TASK_NAME) == "train"
+        if ack:
+            # Normal END_RUN can arrive as soon as the last result is accepted.
+            runner._handle_end_run("end_run", Shareable(), context)
+        return ack
+
+    runner._send_task_result.side_effect = submit
+    args = phase_args(PUSH)
+    if ack:
+        runner.run("app", args)
+        assert args.task_scope_outcome == {"status": TASK_COMPLETE, "task_id": "task-1"}
+    else:
+        with pytest.raises(RuntimeError, match="client execution failed"):
+            runner.run("app", args)
+        assert args.task_scope_outcome is None
+    runner.engine.get_task_assignment.assert_not_called()
+    runner._process_task.assert_not_called()
+    runner._send_task_result.assert_called_once()
+    assert [call.args[0] for call in runner.fire_event.call_args_list] == [
+        EventType.BEFORE_SEND_TASK_RESULT,
+        EventType.AFTER_SEND_TASK_RESULT,
+    ]
+
+
+@pytest.mark.parametrize("phase,status", [(PULL, INPUT_READY), (COMPUTE, RESULT_READY), (PUSH, TASK_COMPLETE)])
+def test_phase_receipt_follows_cleanup_and_only_push_uploads_workspace(attempt_dir, monkeypatch, phase, status):
+    directory, attempt = attempt_dir
+    phase_directory = directory / phase
+    phase_directory.mkdir()
+    args = _attempt_args(directory, attempt)
+    args.set.append(f"{PHASE_OPTION}={phase}")
+
+    def run_worker(received_args, app_runner_class, *, upload_workspace_results):
+        assert upload_workspace_results is (phase == PUSH)
+        received_args.task_scope_outcome = {"status": status, "task_id": "task-1"}
+        assert not (phase_directory / RECEIPT_FILE).exists()
+
+    monkeypatch.setattr(worker, "run_worker", run_worker)
+    assert worker.main(args) == 0
+    assert read_receipt(str(phase_directory), attempt) == {
+        "attempt": attempt,
+        "phase": phase,
+        "status": status,
+        "task_id": "task-1",
+    }
+    assert not (directory / RECEIPT_FILE).exists()
+
+
+@pytest.mark.parametrize("phase,status", [(PULL, INPUT_READY), (COMPUTE, RESULT_READY), (PUSH, TASK_COMPLETE)])
+def test_phase_cleanup_failure_withholds_receipt(attempt_dir, monkeypatch, phase, status):
+    directory, attempt = attempt_dir
+    (directory / phase).mkdir()
+    args = _attempt_args(directory, attempt)
+    args.set.append(f"{PHASE_OPTION}={phase}")
+
+    def run_worker(received_args, app_runner_class, *, upload_workspace_results):
+        received_args.task_scope_outcome = {"status": status, "task_id": "task-1"}
+        raise RuntimeError("phase cleanup failed")
+
+    monkeypatch.setattr(worker, "run_worker", run_worker)
+    with pytest.raises(RuntimeError, match="phase cleanup failed"):
+        worker.main(args)
+    assert not (directory / phase / RECEIPT_FILE).exists()
+
+
+def test_unknown_phase_is_rejected_before_any_worker_initialization(runner, phased, monkeypatch):
+    _, _, phase_args = phased
+    args = phase_args("bogus")
+    run_worker = MagicMock()
+    monkeypatch.setattr(worker, "run_worker", run_worker)
+    with pytest.raises(ValueError, match="invalid task-scope phase"):
+        worker.main(args)
+    with pytest.raises(ValueError, match="invalid task-scope phase"):
+        runner.run("app", args)
+    run_worker.assert_not_called()
+    runner.init_run.assert_not_called()

@@ -93,7 +93,9 @@ class GapController(Controller):
         round_number = client_task.task.data["round"]
         if result.get_return_code() != ReturnCode.OK or result.get("value") != round_number + 1:
             raise RuntimeError("counter task failed or lost checkpoint continuity")
-        self.results.setdefault(str(round_number), {})[client_task.client.name] = dict(result)
+        self.results.setdefault(str(round_number), {})[client_task.client.name] = {
+            key: result[key] for key in ("round", "value", "pid", "slurm_id", "finished_at")
+        }
 
     def control_flow(self, abort_signal, fl_ctx):
         clients = [c.name for c in fl_ctx.get_engine().get_clients()]

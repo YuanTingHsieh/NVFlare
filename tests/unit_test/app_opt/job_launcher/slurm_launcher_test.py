@@ -39,7 +39,7 @@ from nvflare.app_opt.job_launcher.slurm.launcher import (
 )
 from nvflare.app_opt.job_launcher.slurm.manager import _job_key
 from nvflare.app_opt.job_launcher.study_runtime import SecretEnvRef, StudyRuntime
-from nvflare.private.fed.task_scope.protocol import WORKER_MODULE_CONTEXT_KEY
+from nvflare.private.fed.task_scope.protocol import COMPUTE, PHASE_OPTION, PULL, PUSH, WORKER_MODULE_CONTEXT_KEY
 
 
 def _workspace(tmp_path):
@@ -95,6 +95,25 @@ def test_resource_resolution_combines_portable_gpu_total():
 
     assert resources.gpus_per_node == 2
     assert resources.nodes == 1
+
+
+@pytest.mark.parametrize("phase,expected_gpus", [(PULL, None), (COMPUTE, 2), (PUSH, None)])
+def test_phased_slurm_requests_gpus_only_for_compute(tmp_path, phase, expected_gpus):
+    workspace = _workspace(tmp_path)
+    launcher = _launcher(tmp_path, workspace, task_scoped=True, task_phased=True)
+    ctx = _fl_ctx(workspace)
+    ctx.set_prop(PHASE_OPTION, phase, private=True, sticky=False)
+    meta = {
+        JobConstants.JOB_ID: "job-1",
+        JobMetaKey.RESOURCE_SPEC.value: {"site-1": {"num_of_gpus": 2, "num_of_cpus": 4}},
+    }
+    plan = launcher._build_launch_plan(meta, ctx)
+    assert plan.resources.gpus_per_node == expected_gpus
+    assert plan.resources.cpus_per_node == 4
+    if phase in (PULL, PUSH):
+        assert plan.study_env["CUDA_VISIBLE_DEVICES"] == ""
+    else:
+        assert "CUDA_VISIBLE_DEVICES" not in plan.study_env
 
 
 def test_resource_resolution_uses_slurm_node_topology():

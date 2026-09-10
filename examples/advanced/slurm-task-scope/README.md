@@ -1,249 +1,166 @@
-# Experimental Slurm: whole CJ per task (Arch D, N=1)
+# Experimental phased-D execution with Slurm
 
-This is an architecture experiment, **not a supported launcher mode**. The default
-Slurm launcher is unchanged. This version uses the existing task/result transport;
-it does not implement a new durable server commit protocol.
+This prototype runs ordinary synchronous tasks as three sequential CJs:
 
-## What is implemented
+```text
+CP: availability probe → supervise each phase → wait for next task
+                         │
+                  CPU pull CJ
+                         │ input.fobs + input.json
+                  GPU compute CJ
+                         │ result.fobs + result.json
+                  compute allocation settles
+                         │
+                  CPU push CJ → existing task-result submission / ACK
+```
 
-1. A logical job handle lives in the existing CP. It remains registered for job
-   heartbeat, cancellation, and final outcome accounting while no CJ exists.
-2. A configured SJ component answers an authenticated, **nonassigning** availability
-   probe. It supports the built-in ordinary broadcast/send scheduler only.
-3. When work is available, CP submits a Slurm allocation running the entire CJ:
-   config construction, Cell, ClientRunner, filters, and Executor.
-4. The CJ processes at most one ordinary synchronous task. Only a successful
-   result-submission ACK and successful worker cleanup produce an attempt-specific
-   receipt. The parent also requires a successful Slurm result.
-5. CP waits for Slurm terminal accounting/cleanup before permitting another CJ.
-   It holds no Slurm allocation between attempts. A stale readiness token that
-   produced TRY_AGAIN does not repeatedly trigger more allocations.
-6. SJ explicitly notifies CP when scheduling ends. A missing SJ endpoint without
-   that notice is a bounded communication failure, never inferred success.
+CP handles readiness and physical allocation supervision. Task payloads,
+Executors, filters, Cell communication and publication remain in CJs. Each phase
+builds the full CJ stack, with its own process and Slurm allocation. This retains
+D's application/runtime trust boundary; it does not isolate application code
+from Cell credentials as proposed in A/B.
 
-Slurm's queue/accounting/cancellation behavior is inherited. In particular, an
-accounting outage can delay allocation settlement; the new communication timeout
-does not impose a new universal deadline on Slurm itself.
+The compute allocation must be terminal before CP submits the CPU push phase.
+Saving a local result does not mean the server has received it or completed the
+job. The logical client handle remains active through upload/ACK and idle gaps.
 
-The counter example is deliberately small: it requests a GPU allocation but does
-not run CUDA kernels. It demonstrates allocation lifetime and file-backed state
-continuity, not training throughput, GPU utilization, or model correctness.
+## Configure production sites
 
-## Code ownership
+Follow the existing [Slurm launcher setup](../../../docs/user_guide/slurm_job_launcher.rst).
+Provision one server and two client startup kits. CP must run without a reserved
+GPU. Each site's workspace must survive worker exit and be mounted at the same
+absolute path on CP and all CPU/GPU nodes. Every process uses the same revision.
 
-Task-scoped execution is runtime behavior, not a Slurm feature. The experiment
-separates the shared internal implementation from its first launcher adapter:
-
-| Location | Responsibility |
-|---|---|
-| `nvflare/private/fed/task_scope/launcher.py` | CP logical participation, readiness probes, terminal notifications, attempt/receipt lifecycle |
-| `nvflare/private/fed/task_scope/runner.py` and `worker.py` | One-task CJ execution and post-cleanup receipt |
-| `nvflare/private/fed/task_scope/server.py` and `protocol.py` | SJ readiness/terminal handling and shared protocol |
-| Existing `nvflare/app_opt/job_launcher/slurm/launcher.py` | Physical allocation submission, tracking, accounting and cancellation; task scope only selects the shared runtime wrapper |
-
-The private implementation does not import Slurm. An adapter must provide a
-physical handle whose `wait()` includes allocation settlement/cleanup, plus a
-workspace that survives worker exit. Moving code does **not** establish support
-for another launcher; only the Slurm adapter is implemented in this experiment.
-
-## Job participation must outlive individual CJs
-
-In the ordinary workflow path, SP compares the job IDs reported by CP with the
-expected participants and forwards missing-job reports to SJ. SJ's dead-client
-monitor ages those reports; it does not simply count currently running CJs.
-
-The experimental logical handle stays in CP's job registry while its physical
-Slurm allocation is absent. CP therefore continues reporting participation during
-idle gaps and queueing. Individual CJ exits do not finish that logical handle
-unless the attempt fails or the logical job ends. This uses no synthetic CJ
-heartbeat and does not disable genuine participant-loss detection.
-
-| Situation | Intended interpretation |
-|---|---|
-| CP owns the logical job; all CJs intentionally absent between tasks | Participants remain registered; job is not dead |
-| CP owns the logical job; next allocation is pending | Participant remains registered; task deadlines still apply |
-| Active CJ fails | Failed attempt; this experiment terminates logical participation without automatic retry |
-| CP loses its job registration, or the site is declared disconnected | Existing missing-participant detection and job policy still apply |
-| SJ ends scheduling while a CJ is finishing | Parent waits for worker cleanup, receipt and Slurm settlement before reporting its outcome |
-
-This distinction covers the ordinary workflow dead-client monitor, not every
-application's liveness rules. CCWF, TIE and XGBoost controllers have independent
-status/progress timers. Keeping CP's job registration does not satisfy those
-timers or clear a previously issued dead-client report. Those workflows remain
-outside this experiment's scope.
-
-## Run on a real Slurm deployment
-
-Use a dedicated test workspace. Follow the existing
-[Slurm deployment guide](../../../docs/user_guide/admin_guide/deployment/slurm_job_launcher.rst)
-to prepare one server and two clients, with a shared workspace per client visible
-at the same absolute path on CP and compute nodes. All parents and worker Python
-environments/images must contain this prototype revision.
-
-Run CP in a CPU-only service/allocation. Recycling CJs cannot release GPUs that
-the deployment independently reserves for its long-lived parent.
-
-Before starting each CP, keep the existing
-`nvflare.app_opt.job_launcher.slurm.ClientSlurmJobLauncher` component in its
-prepared `local/resources.json` and add `"task_scoped": true` to that component's
-arguments. Preserve all other site-specific arguments, mounts, scheduler commands,
-account, partition, Python path, and resource-manager configuration. The existing
-launcher still owns every physical allocation. Leave the server launcher unchanged.
-
-Optional extra experimental launcher arguments:
+Keep the existing `nvflare.app_opt.job_launcher.slurm.ClientSlurmJobLauncher` in
+each CP's `local/resources.json`, preserving scheduler commands, account,
+partition, Python path, mounts, and resource-manager settings. Add:
 
 ```json
 {
   "task_scoped": true,
+  "task_phased": true,
   "task_probe_interval": 2.0,
   "task_probe_timeout": 5.0,
   "task_communication_timeout": 120.0
 }
 ```
 
-From this example directory, export the job:
+`task_phased` requires `task_scoped=true`. Pull/push use the job's CPU/memory
+request with no GPU GRES and empty CUDA/ROCm device visibility. Compute uses the
+original resource request. The configured partition must accept CPU allocations;
+this prototype does not select a different partition per phase. Keep the
+existing server launcher configuration.
+
+For comparison, `task_scoped=true, task_phased=false` selects the earlier whole-CJ
+per-task baseline, which retains its GPU through upload and cleanup.
+`task_scoped=false` retains the standard job-lifetime CJ.
+
+## Export and submit the example
 
 ```bash
 python job.py --output /absolute/test-job-exports --clients site-1 site-2 --rounds 3 --gap-seconds 30 --gpus 1
 ```
 
-Submit the exported `slurm-task-scope` directory through the normal NVFlare admin
-job workflow. The exported server app already includes `TaskScopedServer` from
-`nvflare.private.fed.task_scope.server`. Re-export jobs created before this
-prototype's module relocation; the old experimental paths are not aliases.
-The controller waits for every client's result, then deliberately schedules no
-work for the configured gap (including after the final round).
+Submit the exported `slurm-task-scope` directory through the normal admin job
+workflow. The server app includes
+`nvflare.private.fed.task_scope.server.TaskScopedServer`. Its authenticated CP
+probe advertises ordinary broadcast/send work without assigning or pulling the
+payload. Only the pull CJ makes the normal task request. A stale readiness hint
+can yield TRY_AGAIN, in which case no compute/push allocation is submitted.
 
-Use a long enough gap to observe allocation exit after CJ teardown. Per-task
-timeout includes Slurm queuing and CJ startup; increase it in `GapController`
-for a busy cluster. A readiness probe does not reserve the advertised task.
+The example counter restores explicitly checkpointed state in each compute CJ,
+returns values 1, 2, 3, and records its PID/Slurm ID. The server waits for all
+clients and deliberately leaves a gap after every round. It requests a GPU but
+does not run CUDA kernels; use hello-pt for actual training validation. Increase
+task deadlines to cover all three queue/startup periods plus transfer/compute.
+Use `--gpus 0` only for CPU smoke tests. For a crash test, export a new job with
+`--crash-round 1`; the compute CJ exits 1 before checkpointing that round.
 
-For a crash test, export a **new job** with `--crash-round 1`. Each client exits
-with code 1 before checkpointing round 1. Do not reuse the first job's checkpoint
-directory. For a CPU-only scheduler smoke test, use `--gpus 0`; that is not a GPU
-resource-release test.
+## Handoff and lifecycle contract
 
-## Evidence to collect
+| Phase | Work | Successful local receipt |
+|---|---|---|
+| Pull / CPU | Fetch assignment; persist eager input and server public context | INPUT_READY, or IDLE/END_RUN control response |
+| Compute / GPU | Restore input; run normal data filters, Executor, result filters; persist eager result | RESULT_READY |
+| Push / CPU | Restore result; run send events and existing task-check/send/ACK path; workspace publication | TASK_COMPLETE |
 
-Per client, `<workspace>/<job_id>/.task_scope/events.jsonl` records:
+Artifacts are in `<workspace>/<job_id>/.task_scope/<attempt>/`. Each input/result
+uses a native FOBS stream plus a manifest containing version, job/attempt/task
+identity, byte count and SHA256. The manifest is published last after file sync.
+The next phase validates it before decoding. Partial, corrupt and stale artifacts
+cannot advance the pipeline. No model payload is decoded in CP. Shared storage
+must support hard links and directory fsync for the exclusive publication.
 
-- `waiting_for_work`, `submitting`, scheduler ID returned, `allocation_released`,
-  receipt, and `logical_job_finished`;
-- wall-clock and monotonic timestamps;
-- unique attempt IDs and Slurm IDs, without model or credential bytes.
+Each phase writes its own `<phase>/receipt.json` after worker cleanup. CP checks
+the physical exit code and receipt after the Slurm handle settles. A saved
+result cannot override a failed allocation. TASK_COMPLETE means the existing
+result-submission ACK, not a new durable server commit protocol. Input/result
+artifacts remain in the job workspace for diagnosis and are not automatically
+retried or deleted after ACK in this prototype.
 
-Here `allocated` means sbatch returned an ID; it does **not** prove the allocation
-has left PENDING. Slurm accounting is required to measure actual resource use.
+All components must tolerate construction and START_RUN/END_RUN per phase,
+including CPU phases that never execute a task. Every Executor must declare
+`supports_task_scoped_process = True`; this is an author assertion, not a proof.
+Cross-task state belongs in the task or durable workspace. Data/result filters
+and execution events run in compute. BEFORE_SEND/AFTER_SEND run in push; handlers
+there cannot require GPUs. No in-memory FLContext or component state is carried
+between phases. Pull and compute retain process cleanup but defer workspace
+upload to push. Per-process logs/events are not a new final-log completeness
+protocol.
 
-Each attempt has its own receipt directory. The example also produces:
+The CP's logical handle continues to appear in its job list while CJs are absent.
+SP/SJ therefore retain participation through phase queues and idle gaps. Actual
+CP loss still invokes existing dead-client policy. Parent restart/adoption,
+retries after a lost ACK, and durable coordinator recovery are not provided.
 
-- Client: `task_scope_counter.json`, containing restored round/value, PID and
-  Slurm job ID.
-- Server: `task_scope_results.json`, containing each site's results per round.
+## Required production evidence
 
-For the relevant scheduler IDs, collect:
+`events.jsonl` under `.task_scope/` records submission, returned scheduler ID,
+allocation settlement and receipt, with attempt and `task_phase` values.
+`allocated` means sbatch returned an ID, not that the allocation is RUNNING.
+Correlate these records with `squeue`, `sacct`, `scontrol`, worker logs and GPU
+sampling. The decisive ordering is:
 
-```bash
-squeue --jobs=12345,12346,12347 --format="%.18i %.12T %.30j %.30b"
-sacct --jobs=12345,12346,12347 --format=JobIDRaw,State,ExitCode,Start,End,Elapsed,AllocTRES -P
+```text
+result manifest committed
+  < compute CJ exit
+  < compute Slurm allocation terminal
+  < push sbatch submission
+  < result network send
+  < submission ACK
 ```
 
-Replace the example IDs with those recorded by the experiment. Observe squeue
-during a gap, not only after completion. Acceptance evidence should show:
-
-| Case | Required evidence |
+| Scenario | Acceptance |
 |---|---|
-| Three successful tasks | Three distinct scheduler IDs; values 1, 2, 3 restored across fresh CJs; server job completes |
-| Idle gap | Previous allocation terminal; no new allocation until another task is advertised |
-| All CJs absent beyond the configured dead-client grace | CPs continue reporting the logical job; SJ remains active and the next task succeeds |
-| Long upload/cleanup | GPU allocation remains until the **whole CJ** exits; this baseline does not release at local save |
-| Worker exit 1 / SIGKILL | No successful receipt accepted; no automatic retry; bounded job failure under full-client policy |
-| Abort while idle | No new sbatch; logical parent handle terminates |
-| Abort while pending/running | Existing Slurm cancellation and accounting settle the owned allocation |
-| Missing terminal notice | No invented success; communication timeout or existing server cleanup resolves participation |
-| Two concurrent jobs | Separate CP handles; no per-job overlap; verify scheduler/resource-manager admission |
+| Two clients, three rounds | 18 distinct phase allocations; expected values/model result; successful final server status |
+| Pull and push | No GPU GRES in actual allocation accounting |
+| Slow result upload | CPU push remains active while compute allocation and GPU reservation are absent |
+| Faster client | Its GPU is released while the slower client's compute and federation remain active |
+| Next round | Fresh GPU allocation resumes correctly from task/file state |
+| Idle gap | All CJs may be absent; logical job remains alive and resumes |
+| Compute crash / SIGKILL | No push phase; bounded failure, no success from saved files |
+| Partial artifact / disk failure | No dependent phase; preserve evidence |
+| Push fails or ACK missing | No invented success and no automatic recomputation |
+| Abort idle/pending/running | No later phase; owned allocation cancellation settles |
+| Default launcher control | `task_scoped=false` retains standard behavior |
 
-## Impact demonstrated by the implementation
+## Scope and validation
 
-| Area | Prototype change or semantic impact |
-|---|---|
-| CP | Shared private runtime keeps logical participation and supervises sequential physical allocations; CP is not merely relaunching on exit |
-| SJ | A new authenticated readiness operation and parent-targeted terminal notification; ordinary GET_TASK cannot serve as a pure probe |
-| CJ | An alternate runner/entrypoint processes one task and records a post-cleanup receipt |
-| Existing runtime seams | Defaulted app-runner injection in `worker_process.main`; overridable runner class in `ClientAppRunner`; defaults unchanged |
-| Launcher | Existing `ClientSlurmJobLauncher` supplies physical handles to the shared private runtime when `task_scoped=true`; its scheduler machinery is unchanged |
-| Application state | Executor instances, handlers and filters are reconstructed each incarnation; the example explicitly checkpoints its state |
-| Lifecycle events | START_RUN, ABOUT_TO_END_RUN and END_RUN run per incarnation, not once per logical job |
-| Filters/security | Normal task filters remain in CJ alongside application code; this does not provide A/B-style isolation |
-| Result delivery | Existing eager result submission, not an atomic accepted-result/state commit; publication can still be semantically rejected after a transport ACK |
-| Workspace/logs | Shared workspace survives, but ordinary per-process archival/log behavior remains; complete final-log publication is not newly guaranteed |
-| Operator status | Existing parent status words may display STOPPED during idle or STARTING during admission; use the attempt journal/Slurm for this experiment |
+The shared lifecycle lives in `nvflare/private/fed/task_scope/`; the existing
+Slurm launcher supplies physical handles and GPU-free transfer resource plans.
+No new scheduler implementation is introduced. Single-node allocations and
+eager, synchronous ordinary broadcast/send tasks are supported. Multi-node/DDP,
+lazy/pass-through results, Attach, CCWF/aux tasks and unchanged stateful legacy
+Executors are outside this prototype. Full CJs still initialize on CPU nodes;
+applications that allocate GPUs unconditionally at initialization must adapt.
 
-## Explicit limitations
+Tests under `tests/unit_test/private/fed/task_scope/` and
+`tests/unit_test/app_opt/job_launcher/` check handoffs, phase ordering, rejection,
+resource plans and default-mode regressions. Unit tests do not prove scheduler
+release or production networking. The production Colossus phased-D result must
+be reported separately with its exact commit and artifacts.
 
-- Single-node Slurm allocations only; no multi-node fan-out, DDP, or framework
-  collective validation in this first experiment.
-- Every Executor must explicitly declare `supports_task_scoped_process = True`.
-  This is an author assertion, not an automatic proof. All job components must
-  tolerate repeated initialization/cleanup and use explicit cross-task state.
-- No unchanged stateful legacy Executors, XGBoost histogram, Flower, split
-  learning, CCWF/aux tasks, or Attach/background trainer sessions.
-- Eager ordinary task results only. Pass-through/lazy result sources are rejected
-  because the CJ is going away. No large-model streaming validation yet.
-- No crash recovery/adoption after CP restart, persistent coordinator ledger,
-  automatic task retries, or exactly-once external side effects. The example's
-  checkpoint/replay logic is not a general transaction framework.
-- No automatic resource renegotiation for task-specific requirements: each
-  incarnation reuses the job's Slurm resource request. Framework-side admission
-  remains job-scoped; Slurm owns the physical GPU allocation release.
-- No claim that unit tests prove real Slurm resource release or federation-wide
-  finalization correctness. Cluster testing is still required.
-
-## The proposed pull / compute / push variant
-
-This baseline is **one complete CJ per ordinary task**. It does not implement
-three separate CJs for pulling inputs, computation, and pushing results.
-
-That proposed variant would add explicit phase dispatch, durable inter-phase
-artifact references, phase-specific allocations, and cancellation/recovery across
-the phases. Its compute allocation could end before network publication, unlike
-this baseline. If all phase CJs retain today's full credentials/runtime access,
-it is a phased form of D; task scheduling alone does not introduce A/B's trusted
-supervisor versus restricted application-worker boundary.
-
-## Local validation
-
-Shared-runtime tests live in `tests/unit_test/private/fed/task_scope/`; adapter and
-example tests remain in `tests/unit_test/app_opt/job_launcher/slurm_task_scope_*_test.py`.
-They exercise runner behavior, receipt ordering, pure probes, cancellation and
-readiness races using test doubles. Existing Slurm tests are also run for regression
-coverage. The example exporter can run without Slurm. Real `sbatch` execution,
-Cell-connected end-to-end restart, GPU release, and container cases must be measured
-on the cluster; they are not implied by these tests passing.
-
-Validation performed on 2026-09-10:
-
-| Check | Result |
-|---|---|
-| New server/launcher/receipt/runner/worker tests | Passed locally with mocked runtime/scheduler boundaries |
-| CP job list → SP missing-job sync → SJ dead-client policy | Five local tests passed using real methods with mocked transport/clock: all CJs absent stays alive; missing registrations and real parent-loss reports still fail |
-| Counter in three fresh Python processes | Values 1 → 2 → 3 restored; distinct PIDs |
-| Replayed counter operation | Does not increment twice |
-| Counter `os._exit(1)` injection | Process exits 1 without advancing its checkpoint |
-| Exported job | Custom components bundled; nondefault controller/executor parameters preserved |
-| Combined prototype and launcher/client/server lifecycle regression suite | 966 passed locally after rebasing onto current `main`; see command below |
-| Dependency boundary | Private task-scope modules have no optional-launcher imports; importing them with Slurm imports blocked succeeds |
-| Scoped Black/isort/flake8 and diff whitespace checks | Passed |
-| Actual Slurm, GPU release, full CP↔SJ↔CJ transport | **Not run: Slurm cluster access required** |
-
-Combined regression command from the repository root:
-
-```bash
-python -m pytest -q tests/unit_test/app_opt/job_launcher \
-  tests/unit_test/private/fed/task_scope \
-  tests/unit_test/private/fed/client/client_runner_test.py \
-  tests/unit_test/private/fed/client/client_executor_test.py \
-  tests/unit_test/private/fed/app/job_process_cleanup_test.py \
-  tests/unit_test/private/fed/server/fed_server_test.py \
-  tests/unit_test/apis/impl/wf_comm_server_test.py
-```
+Earlier production baseline `bfe583a9e` demonstrated one site's allocation
+release after result ACK while the other site ran, but failed after round 0 due
+to example JSON serialization of runtime headers. The example now records only
+its application fields. That baseline does not establish phased-D success.

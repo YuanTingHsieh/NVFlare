@@ -21,7 +21,7 @@ from nvflare.private.fed.task_scope.server import TaskScopedServer
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Export the experimental whole-CJ-per-task Slurm job")
+    parser = argparse.ArgumentParser(description="Export the experimental task-scoped/phased-D Slurm job")
     parser.add_argument("--output", required=True)
     parser.add_argument("--clients", nargs="+", default=["site-1", "site-2"])
     parser.add_argument("--rounds", type=int, default=3)

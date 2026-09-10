@@ -26,6 +26,7 @@ from nvflare.apis.fl_constant import FLContextKey
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.job_launcher_spec import JobProcessArgs, JobReturnCode
 from nvflare.apis.shareable import Shareable
+from nvflare.fuel.common.exit_codes import ProcessExitCode
 from nvflare.fuel.f3.cellnet.defs import MessageHeaderKey
 from nvflare.fuel.f3.cellnet.defs import ReturnCode as CellReturnCode
 from nvflare.private.defs import CellChannel, new_cell_message
@@ -33,9 +34,17 @@ from nvflare.private.fed import task_scope
 from nvflare.private.fed.task_scope.launcher import TaskScopedJobHandle, TaskScopedJobRegistry, launch_task_scope_worker
 from nvflare.private.fed.task_scope.protocol import (
     ATTEMPT_OPTION,
+    COMPUTE,
     DIRECTORY_OPTION,
     DONE,
+    IDLE,
+    INPUT_READY,
+    PHASE_OPTION,
+    PHASES,
+    PULL,
+    PUSH,
     READY,
+    RESULT_READY,
     STATUS,
     TASK_COMPLETE,
     TASK_TOKEN,
@@ -121,6 +130,106 @@ def test_attempts_settle_and_publish_receipts_before_relaunch(tmp_path):
     events = [json.loads(line) for line in Path(handle._root, "events.jsonl").read_text().splitlines()]
     phases = [e["phase"] for e in events if e["phase"] in ("submitting", "allocation_released", "receipt")]
     assert phases == ["submitting", "allocation_released", "receipt"] * 2
+
+
+def _phased_handle(tmp_path, *, failure=None, missing_receipt=None, idle=False, after_phase=None):
+    allocations = []
+    probe = Mock(side_effect=[{STATUS: READY, TASK_TOKEN: "one"}, {STATUS: DONE}])
+    handle = TaskScopedJobHandle("job-1", str(tmp_path / "job-1"), probe, Mock(), phased=True)
+
+    class Allocation:
+        def __init__(self, attempt, directory, phase):
+            self.attempt, self.directory, self.phase = attempt, directory, phase
+            self.finished = False
+            self.terminated = False
+
+        def wait(self):
+            if self.phase != missing_receipt:
+                status = {PULL: INPUT_READY, COMPUTE: RESULT_READY, PUSH: TASK_COMPLETE}[self.phase]
+                if idle:
+                    status = IDLE
+                write_receipt(
+                    str(Path(self.directory, self.phase)),
+                    self.attempt,
+                    {STATUS: status, "task_id": "task-1", "phase": self.phase},
+                )
+            self.finished = True
+            if after_phase:
+                after_phase(handle, self.phase)
+
+        def poll(self):
+            assert self.finished
+            return JobReturnCode.EXECUTION_ERROR if failure == self.phase else JobReturnCode.SUCCESS
+
+        def terminate(self):
+            self.terminated = True
+
+    def launch(attempt, directory, phase):
+        assert all(a.finished for a in allocations), "previous allocation must settle before submitting next phase"
+        allocation = Allocation(attempt, directory, phase)
+        allocations.append(allocation)
+        return allocation
+
+    handle.launch_attempt = launch
+    return handle, allocations
+
+
+def test_phased_job_releases_compute_before_submitting_push(tmp_path):
+    handle, allocations = _phased_handle(tmp_path)
+    handle.wait()
+    assert handle.poll() == JobReturnCode.SUCCESS
+    assert [a.phase for a in allocations] == list(PHASES)
+    assert len({a.attempt for a in allocations}) == 1
+    events = [json.loads(line) for line in Path(handle._root, "events.jsonl").read_text().splitlines()]
+    release = next(
+        i for i, e in enumerate(events) if e["phase"] == "allocation_released" and e.get("task_phase") == COMPUTE
+    )
+    push = next(i for i, e in enumerate(events) if e["phase"] == "submitting" and e.get("task_phase") == PUSH)
+    assert release < push
+
+
+@pytest.mark.parametrize("phase", PHASES)
+def test_failed_phase_stops_pipeline_even_with_success_receipt(tmp_path, phase):
+    handle, allocations = _phased_handle(tmp_path, failure=phase)
+    handle.wait()
+    assert handle.poll() == ProcessExitCode.EXCEPTION
+    assert [a.phase for a in allocations] == list(PHASES[: PHASES.index(phase) + 1])
+
+
+@pytest.mark.parametrize("phase", PHASES)
+def test_missing_phase_receipt_stops_pipeline(tmp_path, phase):
+    handle, allocations = _phased_handle(tmp_path, missing_receipt=phase)
+    handle.wait()
+    assert handle.poll() == ProcessExitCode.INFRASTRUCTURE_ERROR
+    assert [a.phase for a in allocations] == list(PHASES[: PHASES.index(phase) + 1])
+
+
+def test_idle_pull_never_submits_compute_or_push(tmp_path):
+    handle, allocations = _phased_handle(tmp_path, idle=True)
+    handle.wait()
+    assert handle.poll() == JobReturnCode.SUCCESS
+    assert [a.phase for a in allocations] == [PULL]
+
+
+def test_cancel_after_local_result_stops_before_push_and_never_claims_success(tmp_path):
+    handle, allocations = _phased_handle(tmp_path, after_phase=lambda h, p: h.terminate() if p == COMPUTE else None)
+    handle.wait()
+    assert handle.poll() == JobReturnCode.ABORTED
+    assert [a.phase for a in allocations] == [PULL, COMPUTE]
+
+
+def test_phase_bootstrap_is_local_to_the_physical_launch(tmp_path):
+    ctx = FLContext()
+    original = {JobProcessArgs.OPTIONS: ("--set", "existing=value")}
+    ctx.set_prop(FLContextKey.JOB_PROCESS_ARGS, original, private=True, sticky=False)
+
+    def inspect():
+        assert ctx.get_prop(PHASE_OPTION) == PUSH
+        assert f"{PHASE_OPTION}={PUSH}" in ctx.get_prop(FLContextKey.JOB_PROCESS_ARGS)[JobProcessArgs.OPTIONS][1]
+
+    launch_task_scope_worker(inspect, ctx, "attempt-1", str(tmp_path), PUSH)
+    assert ctx.get_prop(PHASE_OPTION) is None
+    assert ctx.get_prop(FLContextKey.JOB_PROCESS_ARGS) is original
 
 
 @pytest.mark.parametrize("field", ["poll_interval", "probe_timeout", "communication_timeout"])

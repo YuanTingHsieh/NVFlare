@@ -43,7 +43,7 @@ from nvflare.security.logging import secure_format_exception
 from nvflare.utils.job_launcher_utils import refresh_custom_dir_import_path
 
 
-def main(args, app_runner_class=ClientAppRunner):
+def main(args, app_runner_class=ClientAppRunner, *, upload_workspace_results=True):
     kv_list = parse_vars(args.set)
 
     # get parent process id
@@ -134,7 +134,8 @@ def main(args, app_runner_class=ClientAppRunner):
             err = create_stats_pool_files_for_job(workspace, args.job_id)
             if err and logger:
                 logger.warning(err)
-            upload_results_on_shutdown(args, secure_train, log=logger)
+            if upload_workspace_results:
+                upload_results_on_shutdown(args, secure_train, log=logger)
 
         try:
             shutdown_job_process_runtime(

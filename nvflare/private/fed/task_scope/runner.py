@@ -16,13 +16,29 @@
 import threading
 
 from nvflare.apis.event_type import EventType
-from nvflare.apis.fl_constant import ReturnCode
+from nvflare.apis.fl_constant import FLContextKey, ReturnCode
+from nvflare.apis.fl_context import FLContext
 from nvflare.apis.shareable import ReservedHeaderKey, Shareable, make_reply
+from nvflare.fuel.utils.argument_utils import parse_vars
 from nvflare.fuel.utils.fobs.decomposers.via_downloader import contains_lazy_download_ref
 from nvflare.private.defs import SpecialTaskName
 from nvflare.private.fed.client.client_app_runner import ClientAppRunner
+from nvflare.private.fed.client.client_engine_executor_spec import TaskAssignment
 from nvflare.private.fed.client.client_runner import ClientRunner
-from nvflare.private.fed.task_scope.protocol import END_RUN, IDLE, TASK_COMPLETE
+from nvflare.private.fed.task_scope.artifacts import read_artifact, write_artifact
+from nvflare.private.fed.task_scope.protocol import (
+    ATTEMPT_OPTION,
+    COMPUTE,
+    DIRECTORY_OPTION,
+    END_RUN,
+    IDLE,
+    INPUT_READY,
+    PHASE_OPTION,
+    PULL,
+    PUSH,
+    RESULT_READY,
+    TASK_COMPLETE,
+)
 
 
 class TaskScopedClientRunner(ClientRunner):
@@ -32,9 +48,13 @@ class TaskScopedClientRunner(ClientRunner):
     This is an application contract: all executors, filters, and handlers must
     tolerate construction, START_RUN, and END_RUN on every incarnation, including
     an idle incarnation. State needed by a later task must be restored from the
-    task or durable shared-workspace artifacts before execute() runs. END_RUN and
-    workspace archival retain their existing per-process behavior; they do not
-    represent completion of the logical federated job in this experiment.
+    task or durable shared-workspace artifacts before execute() runs. END_RUN
+    events do not represent completion of the logical federated job. The phased
+    variant runs pull, compute, and push in separate incarnations, with inputs and
+    fully filtered results persisted between them. Only push archives workspace
+    results; compute never sends its task result to the server. Send events run
+    in the CPU push process; their handlers must not require a GPU or state from
+    the compute process.
 
     Aux tasks, asynchronous execution, lazy results, and components that rely on
     continuing process-local state are unsupported. A successful outcome records
@@ -45,6 +65,15 @@ class TaskScopedClientRunner(ClientRunner):
         args.task_scope_outcome = None
         self._task_scope_outcome = None
         self._task_scope_error = None
+        options = parse_vars(getattr(args, "set", None))
+        self._task_scope_phase = options.get(PHASE_OPTION)
+        self._task_scope_directory = options.get(DIRECTORY_OPTION)
+        self._task_scope_attempt = options.get(ATTEMPT_OPTION)
+        if self._task_scope_phase is not None:
+            if self._task_scope_phase not in (PULL, COMPUTE, PUSH):
+                raise ValueError(f"invalid task-scope phase: {self._task_scope_phase}")
+            if not self._task_scope_directory or not self._task_scope_attempt:
+                raise ValueError("task-scope phase requires an attempt ID and artifact directory")
         for executor in self.task_router.task_table.values():
             if getattr(executor, "supports_task_scoped_process", False) is not True:
                 raise RuntimeError(
@@ -69,13 +98,18 @@ class TaskScopedClientRunner(ClientRunner):
             if self.run_abort_signal.triggered:
                 raise RuntimeError("task-scoped client was stopped before fetching a task")
             with self.engine.new_context() as fl_ctx:
-                self._task_scope_outcome = self._run_one_task(fl_ctx)
+                if self._task_scope_phase == COMPUTE:
+                    self._task_scope_outcome = self._compute_task(fl_ctx)
+                elif self._task_scope_phase == PUSH:
+                    self._task_scope_outcome = self._push_result(fl_ctx)
+                else:
+                    self._task_scope_outcome = self._run_one_task(fl_ctx)
         except BaseException as e:
             self._task_scope_error = e
             raise
         finally:
-            # Only stop the run signal after the synchronous send/ACK has
-            # completed. This also stops the inherited heartbeat loop on IDLE.
+            # Stop after the phase handoff (or send/ACK for push and baseline),
+            # so teardown cannot interrupt its own result publication.
             self.run_abort_signal.trigger(True)
             heartbeat_thread.join(timeout=1.0)
 
@@ -92,24 +126,88 @@ class TaskScopedClientRunner(ClientRunner):
         if not isinstance(task.data, Shareable):
             raise TypeError("task-scoped task data must be a Shareable")
 
+        if self._task_scope_phase == PULL:
+            peer_ctx = fl_ctx.get_peer_context()
+            if not isinstance(peer_ctx, FLContext) or peer_ctx.get_job_id() != self.job_id:
+                raise RuntimeError("task-scoped input requires the authenticated server's matching job context")
+            task.data.set_peer_props(peer_ctx.get_all_public_props())
+            self._write_task_artifact("input", task, task.data)
+            self.log_info(
+                fl_ctx, f"task-scope input committed: attempt={self._task_scope_attempt}, task={task.task_id}"
+            )
+            return {"status": INPUT_READY, "task_id": task.task_id}
+
         self.log_info(fl_ctx, f"executing task-scoped assignment: name={task.name}, id={task.task_id}")
         result = self._process_task(task, fl_ctx)
         self.fire_event(EventType.BEFORE_SEND_TASK_RESULT, fl_ctx)
+        self._require_eager_result(result)
+        return self._submit_result(result, task.task_id, fl_ctx)
+
+    @staticmethod
+    def _require_eager_result(result):
         if result.get_header(ReservedHeaderKey.PASS_THROUGH) or contains_lazy_download_ref(result):
             raise RuntimeError(
                 "task-scoped execution requires eager task results; materialize lazy download references "
                 "inside the executor before returning the Shareable"
             )
 
-        submitted = self._send_task_result(result, task.task_id, fl_ctx)
+    def _write_task_artifact(self, kind, task, data):
+        write_artifact(
+            self._task_scope_directory,
+            self._task_scope_attempt,
+            self.job_id,
+            kind,
+            task.name,
+            task.task_id,
+            data,
+        )
+
+    def _read_task_artifact(self, kind):
+        artifact = read_artifact(self._task_scope_directory, self._task_scope_attempt, self.job_id, kind)
+        return TaskAssignment(artifact["task_name"], artifact["task_id"], artifact["data"])
+
+    def _compute_task(self, fl_ctx):
+        task = self._read_task_artifact("input")
+        peer_props = task.data.get_peer_props()
+        if not isinstance(peer_props, dict):
+            raise RuntimeError("task-scoped input is missing the server's public context")
+        peer_ctx = FLContext()
+        peer_ctx.set_public_props(peer_props)
+        if peer_ctx.get_job_id() != self.job_id:
+            raise RuntimeError("task-scoped input server context does not match the job")
+        fl_ctx.set_peer_context(peer_ctx)
+        result = self._process_task(task, fl_ctx)
+        # Task data/result filters and execution events run here. Send events
+        # belong to the later CPU push incarnation and must be CPU-compatible.
+        self._require_eager_result(result)
+        self._require_success(result, task.task_id)
+        self._write_task_artifact("result", task, result)
+        self.log_info(fl_ctx, f"task-scope result committed: attempt={self._task_scope_attempt}, task={task.task_id}")
+        return {"status": RESULT_READY, "task_id": task.task_id}
+
+    def _push_result(self, fl_ctx):
+        task = self._read_task_artifact("result")
+        result = task.data
+        fl_ctx.set_prop(FLContextKey.TASK_NAME, task.name, private=True, sticky=False)
+        fl_ctx.set_prop(FLContextKey.TASK_ID, task.task_id, private=True, sticky=False)
+        fl_ctx.set_prop(FLContextKey.TASK_RESULT, result, private=True, sticky=False)
+        self.fire_event(EventType.BEFORE_SEND_TASK_RESULT, fl_ctx)
+        self._require_eager_result(result)
+        return self._submit_result(result, task.task_id, fl_ctx)
+
+    def _submit_result(self, result, task_id, fl_ctx):
+        submitted = self._send_task_result(result, task_id, fl_ctx)
         self.fire_event(EventType.AFTER_SEND_TASK_RESULT, fl_ctx)
         if not submitted:
-            raise RuntimeError(f"task {task.task_id} did not receive a successful result-submission ACK")
+            raise RuntimeError(f"task {task_id} did not receive a successful result-submission ACK")
+        self._require_success(result, task_id)
+        return {"status": TASK_COMPLETE, "task_id": task_id}
+
+    def _require_success(self, result, task_id):
         if result.get_return_code() != ReturnCode.OK:
-            raise RuntimeError(f"task {task.task_id} returned failure code {result.get_return_code()}")
+            raise RuntimeError(f"task {task_id} returned failure code {result.get_return_code()}")
         if self._run_abort_requested:
-            raise RuntimeError(f"task {task.task_id} was aborted")
-        return {"status": TASK_COMPLETE, "task_id": task.task_id}
+            raise RuntimeError(f"task {task_id} was aborted")
 
     def _handle_do_task(self, topic, request, fl_ctx):
         # Aux tasks could execute concurrently with the ordinary task and defeat

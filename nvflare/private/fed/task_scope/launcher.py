@@ -31,15 +31,23 @@ from nvflare.private.aux_runner import AuxMsgTarget
 from nvflare.private.defs import CellChannel, new_cell_message
 from nvflare.private.fed.task_scope.protocol import (
     ATTEMPT_OPTION,
+    COMPUTE,
     DIRECTORY_OPTION,
     DONE,
     END_RUN,
     ERROR,
     IDLE,
+    INPUT_READY,
+    PHASE_OPTION,
+    PHASES,
     PROBE_TOPIC,
+    PULL,
+    PUSH,
     READY,
     REASON,
+    RESULT_READY,
     STATUS,
+    TASK_COMPLETE,
     TASK_TOKEN,
     TERMINAL_TOPIC,
     WAIT,
@@ -49,7 +57,7 @@ from nvflare.private.fed.task_scope.protocol import (
 from nvflare.private.fed.utils.fed_utils import get_return_code
 
 
-def launch_task_scope_worker(physical_launch, fl_ctx, attempt, directory):
+def launch_task_scope_worker(physical_launch, fl_ctx, attempt, directory, phase=None):
     """Invoke an existing launcher with common one-task worker bootstrap arguments."""
     job_args = fl_ctx.get_prop(FLContextKey.JOB_PROCESS_ARGS)
     if not isinstance(job_args, dict):
@@ -59,15 +67,24 @@ def launch_task_scope_worker(physical_launch, fl_ctx, attempt, directory):
     if option != "--set" or not isinstance(value, str):
         raise RuntimeError("task-scoped launch requires valid job process set options")
     additions = " ".join((f"{ATTEMPT_OPTION}={shlex.quote(attempt)}", f"{DIRECTORY_OPTION}={shlex.quote(directory)}"))
+    if phase is not None:
+        if phase not in PHASES:
+            raise ValueError("invalid task phase")
+        additions += f" {PHASE_OPTION}={phase}"
     scoped[JobProcessArgs.OPTIONS] = (option, f"{value} {additions}".strip())
     original_worker_module = fl_ctx.get_prop(WORKER_MODULE_CONTEXT_KEY)
+    original_phase = fl_ctx.get_prop(PHASE_OPTION)
     fl_ctx.set_prop(FLContextKey.JOB_PROCESS_ARGS, scoped, private=True, sticky=False)
     fl_ctx.set_prop(WORKER_MODULE_CONTEXT_KEY, "nvflare.private.fed.task_scope.worker", private=True, sticky=False)
+    if phase is not None:
+        fl_ctx.set_prop(PHASE_OPTION, phase, private=True, sticky=False)
     try:
         return physical_launch()
     finally:
         fl_ctx.set_prop(FLContextKey.JOB_PROCESS_ARGS, job_args, private=True, sticky=False)
         fl_ctx.set_prop(WORKER_MODULE_CONTEXT_KEY, original_worker_module, private=True, sticky=False)
+        if phase is not None:
+            fl_ctx.set_prop(PHASE_OPTION, original_phase, private=True, sticky=False)
 
 
 class TaskScopedJobHandle(JobHandleSpec):
@@ -89,6 +106,7 @@ class TaskScopedJobHandle(JobHandleSpec):
         *,
         launch_attempt=None,
         allocation_details=None,
+        phased=False,
     ):
         self.job_id = job_id
         self.run_dir = run_dir
@@ -98,6 +116,7 @@ class TaskScopedJobHandle(JobHandleSpec):
         self.communication_timeout = communication_timeout
         self.launch_attempt = launch_attempt
         self.allocation_details = allocation_details
+        self.phased = phased
         self.active = None
         self.result = None
         self._server_terminal = None
@@ -141,30 +160,37 @@ class TaskScopedJobHandle(JobHandleSpec):
         with self._lock:
             return JobReturnCode.UNKNOWN if self.result is None else self.result
 
-    def _launch_attempt(self, attempt, directory):
+    def _launch_attempt(self, attempt, directory, phase=None):
         """Launch the one-task worker with its attempt ID and receipt directory."""
         if self.launch_attempt is None:
             raise NotImplementedError
-        return self.launch_attempt(attempt, directory)
+        if phase is None:
+            return self.launch_attempt(attempt, directory)
+        return self.launch_attempt(attempt, directory, phase)
 
     def _allocation_details(self, active):
         """Optional launcher-specific diagnostic identifiers."""
         return self.allocation_details(active) if self.allocation_details else {}
 
-    def _run_attempt(self, task_token):
-        attempt = uuid.uuid4().hex
-        directory = os.path.join(self._root, attempt)
-        os.mkdir(directory, mode=0o700)
+    def _run_allocation(self, attempt, directory, phase=None):
+        receipt_dir = os.path.join(directory, phase) if phase is not None else directory
+        if phase is not None:
+            os.mkdir(receipt_dir, mode=0o700)
+        details = {"task_phase": phase} if phase is not None else {}
         # Consume any old legacy marker before submission, including when the
         # next allocation fails before Python/MPM gets a chance to clear it.
         stale_rc = os.path.join(self.run_dir, "_process_rc.txt")
         if os.path.exists(stale_rc):
-            os.replace(stale_rc, os.path.join(directory, "previous_process_rc.txt"))
-        self._record("submitting", attempt=attempt)
-        active = self._launch_attempt(attempt, directory)
+            os.replace(stale_rc, os.path.join(receipt_dir, "previous_process_rc.txt"))
+        self._record("submitting", attempt=attempt, **details)
+        active = (
+            self._launch_attempt(attempt, directory, phase)
+            if phase is not None
+            else self._launch_attempt(attempt, directory)
+        )
         with self._lock:
             self.active = active
-        self._record("allocated", attempt=attempt, **self._allocation_details(active))
+        self._record("allocated", attempt=attempt, **details, **self._allocation_details(active))
         if self._cancel.is_set():
             active.terminate()
         # The adapter must settle allocation accounting and artifact cleanup;
@@ -175,18 +201,54 @@ class TaskScopedJobHandle(JobHandleSpec):
         with self._lock:
             self.active = None
         self._record(
-            "allocation_released", attempt=attempt, rc=rc, launcher_rc=raw_rc, **self._allocation_details(active)
+            "allocation_released",
+            attempt=attempt,
+            rc=rc,
+            launcher_rc=raw_rc,
+            **details,
+            **self._allocation_details(active),
         )
         if self._cancel.is_set():
-            return JobReturnCode.ABORTED
+            return JobReturnCode.ABORTED, None
         # In this experiment a successful file cannot hide scheduler failure.
         if raw_rc != JobReturnCode.SUCCESS or rc != JobReturnCode.SUCCESS:
             code = raw_rc if raw_rc != JobReturnCode.SUCCESS else rc
             # The parent reports only its known failure-code domain. Do not let
             # an unclassified OS code become a non-reportable logical outcome.
-            return code if code in PROCESS_EXIT_REASON or code == JobReturnCode.ABORTED else ProcessExitCode.EXCEPTION
-        receipt = read_receipt(directory, attempt)
-        self._record("receipt", attempt=attempt, receipt=receipt)
+            return (
+                code if code in PROCESS_EXIT_REASON or code == JobReturnCode.ABORTED else ProcessExitCode.EXCEPTION
+            ), None
+        receipt = read_receipt(receipt_dir, attempt)
+        if phase is not None and receipt.get("phase") != phase:
+            raise ValueError("receipt does not match the launched phase")
+        if phase is None and "phase" in receipt:
+            raise ValueError("baseline worker cannot return a phase receipt")
+        self._record("receipt", attempt=attempt, receipt=receipt, **details)
+        return None, receipt
+
+    def _run_attempt(self, task_token):
+        attempt = uuid.uuid4().hex
+        directory = os.path.join(self._root, attempt)
+        os.mkdir(directory, mode=0o700)
+        task_id = None
+        for phase in PHASES if self.phased else (None,):
+            if self._cancel.is_set():
+                return JobReturnCode.ABORTED
+            # Completion while a handoff is pending is not proof of publication.
+            if phase in (COMPUTE, PUSH) and self._server_terminal is not None:
+                return ProcessExitCode.EXCEPTION
+            rc, receipt = self._run_allocation(attempt, directory, phase)
+            if rc is not None:
+                return rc
+            if phase is not None:
+                if phase == PULL and receipt[STATUS] in (IDLE, END_RUN):
+                    break
+                expected = {PULL: INPUT_READY, COMPUTE: RESULT_READY, PUSH: TASK_COMPLETE}[phase]
+                if receipt[STATUS] != expected:
+                    raise ValueError("unexpected phase receipt status")
+                if task_id is not None and receipt["task_id"] != task_id:
+                    raise ValueError("task identity changed between phases")
+                task_id = receipt["task_id"]
         if receipt[STATUS] == IDLE:
             # A readiness hint can become stale while the launcher queues the CJ.
             # Do not reacquire resources repeatedly for the same invalidated hint.
@@ -337,6 +399,7 @@ class TaskScopedJobLauncherMixin:
         self,
         *,
         task_scoped=False,
+        task_phased=False,
         task_probe_interval=2.0,
         task_probe_timeout=5.0,
         task_communication_timeout=120.0,
@@ -344,7 +407,10 @@ class TaskScopedJobLauncherMixin:
     ):
         if not isinstance(task_scoped, bool):
             raise ValueError("task_scoped must be bool")
+        if not isinstance(task_phased, bool) or (task_phased and not task_scoped):
+            raise ValueError("task_phased requires task_scoped=True and must be bool")
         self.task_scoped = task_scoped
+        self.task_phased = task_phased
         self._task_scope = (
             TaskScopedJobRegistry(task_probe_interval, task_probe_timeout, task_communication_timeout)
             if task_scoped
@@ -373,12 +439,13 @@ class TaskScopedJobLauncherMixin:
         job_id, run_dir = self._prepare_task_scoped_job(job_meta, fl_ctx)
 
         def create_handle(probe, poll_interval, communication_timeout):
-            def launch_attempt(attempt, directory):
+            def launch_attempt(attempt, directory, phase=None):
                 return launch_task_scope_worker(
                     lambda: super(TaskScopedJobLauncherMixin, self).launch_job(job_meta, fl_ctx),
                     fl_ctx,
                     attempt,
                     directory,
+                    phase,
                 )
 
             return TaskScopedJobHandle(
@@ -390,6 +457,7 @@ class TaskScopedJobLauncherMixin:
                 communication_timeout,
                 launch_attempt=launch_attempt,
                 allocation_details=self._task_scope_allocation_details,
+                phased=self.task_phased,
             )
 
         return self._task_scope.register(job_id, fl_ctx.get_engine(), create_handle)
