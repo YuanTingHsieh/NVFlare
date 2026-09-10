@@ -63,6 +63,8 @@ from nvflare.fuel.f3.drivers.file_driver import SCHEME as SHARED_FILE_SCHEME
 from nvflare.fuel.f3.drivers.file_driver import parse_file_url
 from nvflare.fuel.utils.config_service import ConfigService
 from nvflare.fuel.utils.secret_utils import has_secret_refs
+from nvflare.private.fed.task_scope.launcher import TaskScopedJobLauncherMixin
+from nvflare.private.fed.task_scope.protocol import WORKER_MODULE_CONTEXT_KEY
 from nvflare.utils.job_launcher_utils import (
     get_client_job_args,
     get_credential_env,
@@ -512,7 +514,7 @@ class SlurmJobLauncher(JobLauncherSpec):
             job_id=job_id,
             site_name=site_name,
             run_dir=run_dir,
-            exe_module=self.EXE_MODULE,
+            exe_module=fl_ctx.get_prop(WORKER_MODULE_CONTEXT_KEY) or self.EXE_MODULE,
             module_args=self.get_module_args(job_args),
             resources=resources,
             directives=directives,
@@ -546,10 +548,21 @@ class SlurmJobLauncher(JobLauncherSpec):
             self.manager.shutdown()
 
 
-class ClientSlurmJobLauncher(SlurmJobLauncher):
+class ClientSlurmJobLauncher(TaskScopedJobLauncherMixin, SlurmJobLauncher):
     EXE_MODULE = "nvflare.private.fed.app.client.worker_process"
     SUPPORTS_ADDITIONAL_NODE_COMMAND = True
     SUPPORTS_CLIENT_API_ATTACH = True
+
+    def _prepare_task_scoped_job(self, job_meta, fl_ctx):
+        if self.manager is None:
+            raise SlurmLauncherError("nested Slurm job launch is unavailable inside a Slurm child process")
+        plan = self._build_launch_plan(job_meta, fl_ctx)
+        if plan.resources.nodes != 1 or plan.additional_node_command:
+            raise SlurmLauncherError("task-scoped execution supports single-node allocations only")
+        return plan.job_id, plan.run_dir
+
+    def _task_scope_allocation_details(self, handle):
+        return {"slurm_id": handle.job_id}
 
     def get_module_args(self, job_args: dict) -> tuple:
         return _module_args(job_args, get_client_job_args(include_exe_module=False, include_set_options=True))

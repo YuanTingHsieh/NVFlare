@@ -39,6 +39,7 @@ from nvflare.app_opt.job_launcher.slurm.launcher import (
 )
 from nvflare.app_opt.job_launcher.slurm.manager import _job_key
 from nvflare.app_opt.job_launcher.study_runtime import SecretEnvRef, StudyRuntime
+from nvflare.private.fed.task_scope.protocol import WORKER_MODULE_CONTEXT_KEY
 
 
 def _workspace(tmp_path):
@@ -456,6 +457,22 @@ def test_launch_plan_uses_fixed_worker_and_one_resolved_job_spec(tmp_path):
     assert plan.study_secret_env[JobProcessEnv.TOKEN_SIGNATURE] == "secret-signature"
     assert plan.study_secret_env[JobProcessEnv.SSID] == "secret-ssid"
     assert plan.resources.nodes == 1
+
+
+def test_launch_plan_accepts_only_private_runtime_worker_override(tmp_path):
+    workspace = _workspace(tmp_path)
+    launcher = _launcher(tmp_path, workspace)
+    fl_ctx = _fl_ctx(workspace, module="job.cannot.override.worker")
+    fl_ctx.set_prop(
+        WORKER_MODULE_CONTEXT_KEY,
+        "nvflare.private.fed.task_scope.worker",
+        private=True,
+        sticky=False,
+    )
+
+    plan = launcher._build_launch_plan({JobConstants.JOB_ID: "job-1"}, fl_ctx)
+
+    assert plan.exe_module == "nvflare.private.fed.task_scope.worker"
 
 
 def _multinode_meta(

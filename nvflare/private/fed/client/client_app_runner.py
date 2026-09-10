@@ -38,6 +38,7 @@ from nvflare.private.privacy_manager import PrivacyService
 
 class ClientAppRunner(Runner):
 
+    CLIENT_RUNNER_CLASS = ClientRunner
     logger = get_module_logger(__module__, __qualname__)
 
     def __init__(self, time_out=60.0) -> None:
@@ -135,7 +136,7 @@ class ClientAppRunner(Runner):
         federated_client.handlers = conf.runner_config.handlers
         with run_manager.new_context() as fl_ctx:
             self._set_fl_context(fl_ctx, app_root, args, workspace, secure_train)
-            client_runner = ClientRunner(
+            client_runner = self.CLIENT_RUNNER_CLASS(
                 config=conf.runner_config,
                 client_config=federated_client.client_args,
                 job_id=args.job_id,

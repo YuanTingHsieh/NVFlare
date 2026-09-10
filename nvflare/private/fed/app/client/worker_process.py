@@ -43,7 +43,7 @@ from nvflare.security.logging import secure_format_exception
 from nvflare.utils.job_launcher_utils import refresh_custom_dir_import_path
 
 
-def main(args):
+def main(args, app_runner_class=ClientAppRunner):
     kv_list = parse_vars(args.set)
 
     # get parent process id
@@ -118,7 +118,7 @@ def main(args):
         federated_client.fl_ctx.set_prop(FLContextKey.CLIENT_NAME, args.client_name, private=False)
         federated_client.fl_ctx.set_prop(FLContextKey.WORKSPACE_ROOT, args.workspace, private=True)
 
-        client_app_runner = ClientAppRunner(time_out=kv_list.get("app_runner_timeout", 60.0))
+        client_app_runner = app_runner_class(time_out=kv_list.get("app_runner_timeout", 60.0))
         # start parent process checking thread
         thread = threading.Thread(target=monitor_parent_process, args=(client_app_runner, parent_pid, stop_event))
         thread.start()
