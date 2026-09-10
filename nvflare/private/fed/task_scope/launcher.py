@@ -307,8 +307,11 @@ class TaskScopedJobRegistry:
 
             def probe():
                 with engine.new_context() as ctx:
-                    ctx.set_prop(FLContextKey.CURRENT_RUN, job_id, private=False, sticky=False)
-                    ctx.set_prop(FLContextKey.CURRENT_JOB_ID, job_id, private=False, sticky=False)
+                    # A CP context has an empty, public-sticky run ID. Override it
+                    # only for this probe; changing the CP sticker would leak one
+                    # job's identity into concurrent job probes.
+                    ctx.put(FLContextKey.CURRENT_RUN, job_id, private=False, sticky=False)
+                    ctx.put(FLContextKey.CURRENT_JOB_ID, job_id, private=False, sticky=False)
                     replies = engine.aux_runner.send_aux_request(
                         targets=[AuxMsgTarget("server", f"server.{job_id}", job_scoped=False)],
                         topic=PROBE_TOPIC,

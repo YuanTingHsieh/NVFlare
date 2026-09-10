@@ -24,7 +24,7 @@ import pytest
 
 from nvflare.apis.event_type import EventType
 from nvflare.apis.fl_constant import FLContextKey, ReservedKey, ReturnCode
-from nvflare.apis.fl_context import FLContext
+from nvflare.apis.fl_context import FLContext, FLContextManager
 from nvflare.apis.job_launcher_spec import JobProcessArgs, JobReturnCode
 from nvflare.apis.shareable import Shareable, make_reply
 from nvflare.app_opt.job_launcher.slurm.config import JobResources, LaunchPlan, SlurmLauncherError
@@ -464,6 +464,13 @@ def test_launcher_registers_parent_terminal_endpoint_and_probes_explicit_server_
     launcher._build_launch_plan = Mock(return_value=plan)
     launcher.manager = _FakeSlurmManager()
     engine, fl_ctx = _launcher_context()
+    parent_contexts = FLContextManager(
+        engine=engine,
+        identity_name="site-1",
+        job_id="",
+        public_stickers={FLContextKey.CURRENT_JOB_ID: ""},
+    )
+    engine.new_context.side_effect = parent_contexts.new_context
     engine.aux_runner.send_aux_request.return_value = {"server": _reply(DONE)}
     handle = launcher.launch_job({}, fl_ctx)
     assert not launcher.manager.plans
@@ -477,6 +484,11 @@ def test_launcher_registers_parent_terminal_endpoint_and_probes_explicit_server_
     assert kwargs["targets"][0].job_scoped is False
     assert kwargs["topic"] == PROBE_TOPIC
     assert kwargs["fl_ctx"].get_prop(FLContextKey.CURRENT_RUN) == "job-1"
+    assert kwargs["fl_ctx"].get_prop(FLContextKey.CURRENT_JOB_ID) == "job-1"
+    # Probe-local overrides must not turn the deployment-scoped CP context into
+    # a context for this job; other logical jobs may probe concurrently.
+    assert parent_contexts.new_context().get_prop(FLContextKey.CURRENT_RUN) == ""
+    assert parent_contexts.new_context().get_prop(FLContextKey.CURRENT_JOB_ID) == ""
 
 
 def test_task_scoped_mode_reuses_physical_slurm_launch_and_restores_common_bootstrap(tmp_path, monkeypatch):
