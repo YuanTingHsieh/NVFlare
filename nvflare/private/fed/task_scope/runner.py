@@ -131,7 +131,9 @@ class TaskScopedClientRunner(ClientRunner):
             if not isinstance(peer_ctx, FLContext) or peer_ctx.get_job_id() != self.job_id:
                 raise RuntimeError("task-scoped input requires the authenticated server's matching job context")
             task.data.set_peer_props(peer_ctx.get_all_public_props())
-            self._write_task_artifact("input", task, task.data)
+            task_ssid = fl_ctx.get_prop(FLContextKey.SSID)
+            self._require_task_session(task_ssid)
+            self._write_task_artifact("input", task, task.data, task_ssid)
             self.log_info(
                 fl_ctx, f"task-scope input committed: attempt={self._task_scope_attempt}, task={task.task_id}"
             )
@@ -151,7 +153,11 @@ class TaskScopedClientRunner(ClientRunner):
                 "inside the executor before returning the Shareable"
             )
 
-    def _write_task_artifact(self, kind, task, data):
+    def _require_task_session(self, task_ssid):
+        if not isinstance(task_ssid, str) or not task_ssid or task_ssid != self.engine.client.ssid:
+            raise RuntimeError("task-scoped task session is missing or does not match the current client session")
+
+    def _write_task_artifact(self, kind, task, data, task_ssid):
         write_artifact(
             self._task_scope_directory,
             self._task_scope_attempt,
@@ -160,14 +166,20 @@ class TaskScopedClientRunner(ClientRunner):
             task.name,
             task.task_id,
             data,
+            task_ssid=task_ssid,
         )
 
-    def _read_task_artifact(self, kind):
+    def _read_task_artifact(self, kind, fl_ctx):
         artifact = read_artifact(self._task_scope_directory, self._task_scope_attempt, self.job_id, kind)
-        return TaskAssignment(artifact["task_name"], artifact["task_id"], artifact["data"])
+        task_ssid = artifact["task_ssid"]
+        self._require_task_session(task_ssid)
+        # Normal pull_task sets this private, nonsticky property. Fresh compute
+        # and push CJs must restore it without rebinding old work to a new session.
+        fl_ctx.set_prop(FLContextKey.SSID, task_ssid, private=True, sticky=False)
+        return TaskAssignment(artifact["task_name"], artifact["task_id"], artifact["data"]), task_ssid
 
     def _compute_task(self, fl_ctx):
-        task = self._read_task_artifact("input")
+        task, task_ssid = self._read_task_artifact("input", fl_ctx)
         peer_props = task.data.get_peer_props()
         if not isinstance(peer_props, dict):
             raise RuntimeError("task-scoped input is missing the server's public context")
@@ -181,12 +193,12 @@ class TaskScopedClientRunner(ClientRunner):
         # belong to the later CPU push incarnation and must be CPU-compatible.
         self._require_eager_result(result)
         self._require_success(result, task.task_id)
-        self._write_task_artifact("result", task, result)
+        self._write_task_artifact("result", task, result, task_ssid)
         self.log_info(fl_ctx, f"task-scope result committed: attempt={self._task_scope_attempt}, task={task.task_id}")
         return {"status": RESULT_READY, "task_id": task.task_id}
 
     def _push_result(self, fl_ctx):
-        task = self._read_task_artifact("result")
+        task, _ = self._read_task_artifact("result", fl_ctx)
         result = task.data
         fl_ctx.set_prop(FLContextKey.TASK_NAME, task.name, private=True, sticky=False)
         fl_ctx.set_prop(FLContextKey.TASK_ID, task.task_id, private=True, sticky=False)
@@ -194,6 +206,13 @@ class TaskScopedClientRunner(ClientRunner):
         self.fire_event(EventType.BEFORE_SEND_TASK_RESULT, fl_ctx)
         self._require_eager_result(result)
         return self._submit_result(result, task.task_id, fl_ctx)
+
+    def _try_send_result_once(self, result, task_id, fl_ctx):
+        if self._task_scope_phase == PUSH:
+            # A permanent session error must not become False in the run manager
+            # and enter the ordinary transient-send retry loop.
+            self._require_task_session(fl_ctx.get_prop(FLContextKey.SSID))
+        return super()._try_send_result_once(result, task_id, fl_ctx)
 
     def _submit_result(self, result, task_id, fl_ctx):
         submitted = self._send_task_result(result, task_id, fl_ctx)

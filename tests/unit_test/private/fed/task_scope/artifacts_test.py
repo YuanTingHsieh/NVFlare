@@ -40,7 +40,14 @@ def register_decomposers():
 
 
 def _write(directory, data=None, kind="result", **kwargs):
-    values = dict(attempt="attempt-1", job_id="job-1", kind=kind, task_name="train", task_id="task-1")
+    values = dict(
+        attempt="attempt-1",
+        job_id="job-1",
+        kind=kind,
+        task_name="train",
+        task_id="task-1",
+        task_ssid="session-1",
+    )
     values.update(kwargs)
     artifacts.write_artifact(directory, data=data if data is not None else Shareable({"value": 42}), **values)
 
@@ -66,6 +73,7 @@ def test_eager_model_roundtrip_has_no_live_producer_dependency(tmp_path, kind):
         result = _read(tmp_path, kind)
     assert result["task_name"] == "train"
     assert result["task_id"] == "task-1"
+    assert result["task_ssid"] == "session-1"
     assert result["data"].get_header("round") == 2
     np.testing.assert_array_equal(result["data"]["weights"]["layer.weight"], expected)
     assert (tmp_path / f"{kind}.fobs").stat().st_mode & 0o777 == 0o600
@@ -112,7 +120,7 @@ def test_runtime_peer_context_and_task_headers_survive_phase_handoff(tmp_path):
     assert restored.get_cookie("round") == 3
 
 
-@pytest.mark.parametrize("changes", [{"attempt": "other"}, {"job_id": "other"}, {"kind": "input"}, {"version": 2}])
+@pytest.mark.parametrize("changes", [{"attempt": "other"}, {"job_id": "other"}, {"kind": "input"}, {"version": 999}])
 def test_rejects_stale_or_mismatched_manifest_before_decode(tmp_path, changes):
     _write(tmp_path)
     path = tmp_path / "result.json"
@@ -122,6 +130,74 @@ def test_rejects_stale_or_mismatched_manifest_before_decode(tmp_path, changes):
     with patch.object(fobs, "load_from_stream", side_effect=AssertionError("must not decode")):
         with pytest.raises(ValueError, match="stale"):
             _read(tmp_path)
+
+
+@pytest.mark.parametrize("kind", ["input", "result"])
+def test_session_identity_survives_both_phase_artifacts(tmp_path, kind):
+    _write(tmp_path, kind=kind, task_ssid="server-session-at-pull")
+    manifest = json.loads((tmp_path / f"{kind}.json").read_text())
+    assert manifest["version"] == 2
+    assert manifest["task_ssid"] == "server-session-at-pull"
+    assert _read(tmp_path, kind)["task_ssid"] == "server-session-at-pull"
+
+
+def test_write_requires_explicit_session_before_serializing(tmp_path):
+    with patch.object(fobs, "dump_to_stream", side_effect=AssertionError("must not serialize")):
+        with pytest.raises(TypeError, match="task_ssid"):
+            artifacts.write_artifact(tmp_path, "attempt-1", "job-1", "input", "train", "task-1", Shareable())
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    "session",
+    [None, "", 12, True, [], {}, pytest.param("s" * 4097, id="oversized")],
+)
+def test_write_rejects_invalid_session_before_serializing(tmp_path, session):
+    with patch.object(fobs, "dump_to_stream", side_effect=AssertionError("must not serialize")):
+        with pytest.raises(ValueError, match="task_ssid"):
+            _write(tmp_path, task_ssid=session)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("kind", ["input", "result"])
+@pytest.mark.parametrize(
+    "session",
+    [None, "", 12, True, [], {}, pytest.param("s" * 4097, id="oversized")],
+)
+def test_read_rejects_invalid_session_before_decoding(tmp_path, kind, session):
+    _write(tmp_path, kind=kind)
+    path = tmp_path / f"{kind}.json"
+    manifest = json.loads(path.read_text())
+    manifest["task_ssid"] = session
+    path.write_text(json.dumps(manifest))
+    with patch.object(fobs, "load_from_stream", side_effect=AssertionError("must not decode")):
+        with pytest.raises(ValueError, match="task_ssid"):
+            _read(tmp_path, kind)
+
+
+@pytest.mark.parametrize("kind", ["input", "result"])
+def test_read_rejects_missing_session_before_decoding(tmp_path, kind):
+    _write(tmp_path, kind=kind)
+    path = tmp_path / f"{kind}.json"
+    manifest = json.loads(path.read_text())
+    del manifest["task_ssid"]
+    path.write_text(json.dumps(manifest))
+    with patch.object(fobs, "load_from_stream", side_effect=AssertionError("must not decode")):
+        with pytest.raises(ValueError, match="task_ssid"):
+            _read(tmp_path, kind)
+
+
+@pytest.mark.parametrize("kind", ["input", "result"])
+def test_rejects_legacy_manifest_without_session_before_decoding(tmp_path, kind):
+    _write(tmp_path, kind=kind)
+    path = tmp_path / f"{kind}.json"
+    manifest = json.loads(path.read_text())
+    manifest["version"] = 1
+    del manifest["task_ssid"]
+    path.write_text(json.dumps(manifest))
+    with patch.object(fobs, "load_from_stream", side_effect=AssertionError("must not decode")):
+        with pytest.raises(ValueError, match="stale"):
+            _read(tmp_path, kind)
 
 
 @pytest.mark.parametrize("corruption", [b"bad payload", None])

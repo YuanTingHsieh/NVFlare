@@ -90,10 +90,18 @@ Use `--gpus 0` only for CPU smoke tests. For a crash test, export a new job with
 
 Artifacts are in `<workspace>/<job_id>/.task_scope/<attempt>/`. Each input/result
 uses a native FOBS stream plus a manifest containing version, job/attempt/task
-identity, byte count and SHA256. The manifest is published last after file sync.
+identity, originating task session ID, byte count and SHA256. The manifest is
+published last after file sync.
 The next phase validates it before decoding. Partial, corrupt and stale artifacts
 cannot advance the pipeline. No model payload is decoded in CP. Shared storage
 must support hard links and directory fsync for the exclusive publication.
+
+Compute and push validate the originating session against their current client
+session and restore the task-local context that ordinary task pull initializes.
+Missing or stale sessions fail the phase instead of retrying result submission.
+Version-1 artifacts from the earlier prototype lack this session binding and
+cannot be resumed. The existing communicator session check remains enabled;
+transient network retries retain their existing behavior.
 
 Each phase writes its own `<phase>/receipt.json` after worker cleanup. CP checks
 the physical exit code and receipt after the Slurm handle settles. A saved
@@ -168,3 +176,9 @@ Earlier production baseline `bfe583a9e` demonstrated one site's allocation
 release after result ACK while the other site ran, but failed after round 0 due
 to example JSON serialization of runtime headers. The example now records only
 its application fields. That baseline does not establish phased-D success.
+
+The first phased-D production hello-pt run at `d47f985c5` demonstrated GPU
+allocation release before CPU push submission, but failed because the fresh
+push CJ lacked the task-local session context. No round completed; the run was
+aborted for cleanup. The session handoff above addresses that defect; production
+qualification of the corrected revision must still be reported separately.

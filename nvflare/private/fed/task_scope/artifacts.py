@@ -28,7 +28,7 @@ from nvflare.apis.shareable import ReservedHeaderKey, Shareable
 from nvflare.fuel.utils import fobs
 from nvflare.fuel.utils.fobs.decomposers.via_downloader import _GRAPH_LEAF_TYPES, LazyDownloadRef, _iter_graph_children
 
-_VERSION = 1
+_VERSION = 2
 _MAX_MANIFEST_SIZE = 65536
 _CHUNK_SIZE = 1024 * 1024
 
@@ -102,7 +102,7 @@ def _open_regular(path):
     return os.fdopen(fd, "rb")
 
 
-def write_artifact(directory, attempt, job_id, kind, task_name, task_id, data: Shareable):
+def write_artifact(directory, attempt, job_id, kind, task_name, task_id, data: Shareable, *, task_ssid):
     """Commit eager data without a live Cell or a whole-artifact bytes buffer.
 
     Native FOBS includes file-datum contents in the stream; it does not persist
@@ -112,6 +112,7 @@ def write_artifact(directory, attempt, job_id, kind, task_name, task_id, data: S
     _validate_identity(attempt, job_id, kind)
     _validate_text("task_name", task_name)
     _validate_text("task_id", task_id)
+    _validate_text("task_ssid", task_ssid)
     _check_eager_data(data)
     manifest = {
         "version": _VERSION,
@@ -120,6 +121,9 @@ def write_artifact(directory, attempt, job_id, kind, task_name, task_id, data: S
         "kind": kind,
         "task_name": task_name,
         "task_id": task_id,
+        # The local task context's session is not part of the Shareable or its
+        # server peer properties. Preserve it independently of application data.
+        "task_ssid": task_ssid,
     }
 
     def write_payload(stream):
@@ -150,7 +154,7 @@ def read_artifact(directory, attempt, job_id, kind):
         or any(manifest.get(key) != value for key, value in expected.items())
     ):
         raise ValueError("invalid or stale artifact manifest")
-    for name in ("task_name", "task_id"):
+    for name in ("task_name", "task_id", "task_ssid"):
         _validate_text(name, manifest.get(name))
     with _open_regular(os.path.join(directory, f"{kind}.fobs")) as stream:
         fingerprint = _fingerprint(stream)
@@ -159,4 +163,9 @@ def read_artifact(directory, attempt, job_id, kind):
         stream.seek(0)
         data = fobs.load_from_stream(stream, fobs_ctx={"native": True})
     _check_eager_data(data)
-    return {"task_name": manifest["task_name"], "task_id": manifest["task_id"], "data": data}
+    return {
+        "task_name": manifest["task_name"],
+        "task_id": manifest["task_id"],
+        "task_ssid": manifest["task_ssid"],
+        "data": data,
+    }

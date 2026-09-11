@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -19,17 +20,29 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nvflare.apis.event_type import EventType
-from nvflare.apis.fl_constant import FilterKey, FLContextKey, ReturnCode
-from nvflare.apis.fl_context import FLContext
+from nvflare.apis.fl_constant import (
+    FilterKey,
+    FLContextKey,
+    ReservedTopic,
+    ReturnCode,
+    ServerCommandKey,
+    ServerCommandNames,
+)
+from nvflare.apis.fl_context import FLContext, FLContextManager
 from nvflare.apis.shareable import ReservedHeaderKey, Shareable, make_reply
 from nvflare.apis.signal import Signal
+from nvflare.fuel.f3.cellnet.defs import MessageHeaderKey
+from nvflare.fuel.f3.cellnet.defs import ReturnCode as CellReturnCode
 from nvflare.fuel.utils.fobs.decomposers.via_downloader import LazyDownloadRef
-from nvflare.private.defs import SpecialTaskName
+from nvflare.private.defs import SpecialTaskName, new_cell_message
 from nvflare.private.fed.app import job_process_cleanup
 from nvflare.private.fed.app.client import worker_process as worker
 from nvflare.private.fed.client.client_app_runner import ClientAppRunner
 from nvflare.private.fed.client.client_engine_executor_spec import TaskAssignment
+from nvflare.private.fed.client.client_run_manager import ClientRunManager
 from nvflare.private.fed.client.client_runner import ClientRunner, TaskRouter
+from nvflare.private.fed.client.communicator import Communicator
+from nvflare.private.fed.client.fed_client import FederatedClient
 from nvflare.private.fed.task_scope import runner as runner_module
 from nvflare.private.fed.task_scope.artifacts import read_artifact, write_artifact
 from nvflare.private.fed.task_scope.protocol import (
@@ -55,8 +68,7 @@ def _task(name="train", task_id="task-1"):
     return TaskAssignment(name, task_id, Shareable())
 
 
-@pytest.fixture
-def runner():
+def _make_runner():
     result = TaskScopedClientRunner.__new__(TaskScopedClientRunner)
     result.task_router = TaskRouter()
     result.task_router.add_executor(["train"], SimpleNamespace(supports_task_scoped_process=True))
@@ -78,6 +90,12 @@ def runner():
     result._send_job_heartbeat = MagicMock()
     result._process_task = MagicMock(return_value=Shareable())
     result._send_task_result = MagicMock(return_value=True)
+    return result
+
+
+@pytest.fixture
+def runner():
+    result = _make_runner()
     with (
         patch("nvflare.private.fed.client.client_runner.ReliableMessage.shutdown"),
         patch("nvflare.private.fed.client.client_runner.DownloadService.shutdown"),
@@ -484,7 +502,9 @@ def phased(runner, attempt_dir):
     fobs_initialize()
     directory, attempt = attempt_dir
     runner.job_id = "job-1"
+    runner.engine.client.ssid = "session-1"
     fl_ctx = runner.engine.new_context.return_value.__enter__.return_value
+    fl_ctx.set_prop(FLContextKey.SSID, "session-1", private=True, sticky=False)
     peer_ctx = FLContext()
     peer_ctx.set_prop(FLContextKey.CURRENT_RUN, runner.job_id, private=False)
     peer_ctx.set_prop("round", 3, private=False)
@@ -532,10 +552,24 @@ def test_pull_cannot_commit_input_without_matching_server_context(runner, phased
     assert not (directory / "input.json").exists()
 
 
+@pytest.mark.parametrize("task_ssid", [None, "another-session"])
+def test_pull_cannot_commit_input_without_matching_local_session(runner, phased, task_ssid):
+    directory, _, phase_args = phased
+    fl_ctx = runner.engine.new_context.return_value.__enter__.return_value
+    fl_ctx.set_prop(FLContextKey.SSID, task_ssid, private=True, sticky=False)
+    args = phase_args(PULL)
+    with pytest.raises(RuntimeError, match="client execution failed"):
+        runner.run("app", args)
+    assert args.task_scope_outcome is None
+    assert not (directory / "input.json").exists()
+
+
 def test_compute_restores_context_runs_filters_and_commits_before_any_submission(runner, phased):
     directory, attempt, phase_args = phased
     task = runner.engine.get_task_assignment.return_value
-    write_artifact(str(directory), attempt, runner.job_id, "input", task.name, task.task_id, task.data)
+    write_artifact(
+        str(directory), attempt, runner.job_id, "input", task.name, task.task_id, task.data, task_ssid="session-1"
+    )
     fl_ctx = runner.engine.new_context.return_value.__enter__.return_value
     fl_ctx.set_peer_context(None)
     order = []
@@ -585,7 +619,9 @@ def test_compute_restores_context_runs_filters_and_commits_before_any_submission
 def test_compute_failure_never_commits_result_or_submits(runner, phased, failure):
     directory, attempt, phase_args = phased
     task = runner.engine.get_task_assignment.return_value
-    write_artifact(str(directory), attempt, runner.job_id, "input", task.name, task.task_id, task.data)
+    write_artifact(
+        str(directory), attempt, runner.job_id, "input", task.name, task.task_id, task.data, task_ssid="session-1"
+    )
     if failure == "exception":
         runner._process_task.side_effect = RuntimeError("trainer failed")
     elif failure == "failed_result":
@@ -634,7 +670,7 @@ def test_push_only_submits_persisted_payload_and_requires_ack(runner, phased, ac
     result = Shareable({"weight": 7})
     result.set_header(ReservedHeaderKey.TASK_NAME, "train")
     result.set_header(ReservedHeaderKey.TASK_ID, "task-1")
-    write_artifact(str(directory), attempt, runner.job_id, "result", "train", "task-1", result)
+    write_artifact(str(directory), attempt, runner.job_id, "result", "train", "task-1", result, task_ssid="session-1")
 
     def submit(data, task_id, context):
         assert data["weight"] == 7
@@ -723,3 +759,207 @@ def test_unknown_phase_is_rejected_before_any_worker_initialization(runner, work
     worker_runtime.scoped_factory.assert_not_called()
     worker_runtime.default_factory.assert_not_called()
     runner.init_run.assert_not_called()
+
+
+@pytest.fixture
+def session_pipeline(runner, attempt_dir, monkeypatch):
+    """Real task-pull and result-submit stack, replacing only network transport.
+
+    Lifecycle initialization/cleanup is covered separately above. Each phase here
+    has a fresh runner, client, communicator, and FLContextManager, as in a new CJ.
+    """
+    fobs_initialize()
+    directory, attempt = attempt_dir
+    phases = []
+    sleep = MagicMock(side_effect=AssertionError("unexpected result retry"))
+    monkeypatch.setattr("nvflare.private.fed.client.client_runner.time.sleep", sleep)
+
+    def make_phase(phase, session="session-1", mutate_compute_context=False):
+        phase_runner = _make_runner()
+        phase_runner.job_id = "job-1"
+        phase_runner.parent_target = "server"
+        phase_runner.task_check_timeout = 5.0
+        phase_runner.task_check_interval = 0.01
+        phase_runner.submit_task_result_timeout = 5.0
+        phase_runner.task_data_filters = {}
+        phase_runner.task_result_filters = {}
+        executed = []
+
+        def execute(name, data, fl_ctx, abort_signal):
+            executed.append(name)
+            assert fl_ctx.get_prop(FLContextKey.SSID) == "session-1"
+            if mutate_compute_context:
+                fl_ctx.set_prop(FLContextKey.SSID, "executor-mutated", private=True, sticky=False)
+            return Shareable({"weight": data["weight"] + 1})
+
+        phase_runner.task_router.task_table["train"].execute = execute
+        phase_runner._process_task = ClientRunner._process_task.__get__(phase_runner)
+        phase_runner._send_task_result = ClientRunner._send_task_result.__get__(phase_runner)
+        phase_runner.fire_event_with_data = lambda event, ctx, key, value: ctx.set_prop(
+            key, value, private=True, sticky=False
+        )
+        client = FederatedClient.__new__(FederatedClient)
+        client.client_name = "site-1"
+        client.client_args = {"client_name": client.client_name}
+        client.servers = {"project": {}}
+        client.token = "token"
+        client.ssid = session
+        client.handlers = []
+        client.logger = MagicMock()
+        cell = MagicMock()
+        client.communicator = Communicator(client_config=client.client_args, cell=cell)
+        client.communicator.ssid = session
+        engine = ClientRunManager.__new__(ClientRunManager)
+        engine.client = client
+        engine.logger = MagicMock()
+        engine.handlers = []
+        engine.shutdown_streamer = MagicMock()
+        engine.fl_ctx_mgr = FLContextManager(engine=engine, identity_name="site-1", job_id="job-1")
+        engine.aux_runner = MagicMock()
+
+        def task_check(targets, topic, request, timeout, fl_ctx, **kwargs):
+            assert topic == ReservedTopic.TASK_CHECK
+            assert request.get_header(ReservedHeaderKey.TASK_ID) == "task-1"
+            return {"server": make_reply(ReturnCode.OK)}
+
+        engine.aux_runner.send_aux_request.side_effect = task_check
+        phase_runner.engine = engine
+        ctx = engine.new_context()
+        assert ctx.get_prop(FLContextKey.SSID) is None
+        sent = []
+
+        def transport(**kwargs):
+            sent.append(kwargs)
+            kwargs["request"].set_header(MessageHeaderKey.PAYLOAD_LEN, 128)
+            assert kwargs["target"] == "server.job-1"
+            if kwargs["topic"] == ServerCommandNames.GET_TASK:
+                task = Shareable({"weight": 2})
+                task.set_header(ServerCommandKey.TASK_NAME, "train")
+                task.set_header(ReservedHeaderKey.TASK_ID, "task-1")
+                server_ctx = FLContext()
+                server_ctx.set_prop(FLContextKey.CURRENT_RUN, "job-1", private=False)
+                task.set_peer_context(server_ctx)
+                return new_cell_message(
+                    {MessageHeaderKey.RETURN_CODE: CellReturnCode.OK, MessageHeaderKey.PAYLOAD_LEN: 128}, task
+                )
+            assert kwargs["topic"] == ServerCommandNames.SUBMIT_UPDATE
+            return new_cell_message({MessageHeaderKey.RETURN_CODE: CellReturnCode.OK}, Shareable())
+
+        cell.send_request.side_effect = transport
+        args = _attempt_args(directory, attempt)
+        if phase is not None:
+            args.set.append(f"{PHASE_OPTION}={phase}")
+        result = SimpleNamespace(runner=phase_runner, args=args, client=client, cell=cell, sent=sent, executed=executed)
+        phases.append(result)
+        return result
+
+    return SimpleNamespace(make_phase=make_phase, directory=directory, attempt=attempt, phases=phases, sleep=sleep)
+
+
+@pytest.mark.parametrize("mutate_context", [False, True])
+def test_real_pull_to_fresh_push_preserves_session_and_submits_result(session_pipeline, mutate_context):
+    pipeline = session_pipeline
+    pull = pipeline.make_phase(PULL)
+    pull.runner.run("app", pull.args)
+    source = read_artifact(str(pipeline.directory), pipeline.attempt, "job-1", "input")
+    assert source["task_ssid"] == "session-1"
+    compute = pipeline.make_phase(COMPUTE, mutate_compute_context=mutate_context)
+    compute.runner.run("app", compute.args)
+    result = read_artifact(str(pipeline.directory), pipeline.attempt, "job-1", "result")
+    assert result["task_ssid"] == "session-1"
+    push = pipeline.make_phase(PUSH)
+    push.runner.run("app", push.args)
+
+    assert [request["topic"] for request in pull.sent] == [ServerCommandNames.GET_TASK]
+    assert compute.sent == []
+    assert [request["topic"] for request in push.sent] == [ServerCommandNames.SUBMIT_UPDATE]
+    submitted = push.sent[0]["request"].payload
+    assert submitted["weight"] == 3
+    assert submitted.get_header(ReservedHeaderKey.TASK_ID) == "task-1"
+    assert push.args.task_scope_outcome == {"status": TASK_COMPLETE, "task_id": "task-1"}
+    assert all(p.runner.engine.new_context().get_prop(FLContextKey.SSID) is None for p in pipeline.phases)
+    pipeline.sleep.assert_not_called()
+
+
+def test_real_baseline_pull_execute_submit_keeps_existing_session_behavior(session_pipeline):
+    phase = session_pipeline.make_phase(None)
+    phase.runner.run("app", phase.args)
+    assert [request["topic"] for request in phase.sent] == [
+        ServerCommandNames.GET_TASK,
+        ServerCommandNames.SUBMIT_UPDATE,
+    ]
+    assert phase.args.task_scope_outcome == {"status": TASK_COMPLETE, "task_id": "task-1"}
+    session_pipeline.sleep.assert_not_called()
+
+
+def test_real_communicator_rejects_fresh_push_context_without_origin_session(session_pipeline):
+    push = session_pipeline.make_phase(PUSH)
+    fl_ctx = push.runner.engine.new_context()
+    assert fl_ctx.get_prop(FLContextKey.SSID) is None
+    rc = push.client.communicator.submit_update(
+        "project", push.client.token, push.client.ssid, fl_ctx, "site-1", Shareable({"weight": 3}), "train"
+    )
+    assert rc == CellReturnCode.INVALID_SESSION
+    push.cell.send_request.assert_not_called()
+
+
+def test_changed_session_rejects_compute_before_executor_runs(session_pipeline):
+    pipeline = session_pipeline
+    pull = pipeline.make_phase(PULL)
+    pull.runner.run("app", pull.args)
+    compute = pipeline.make_phase(COMPUTE, session="session-2")
+    with pytest.raises(RuntimeError, match="client execution failed"):
+        compute.runner.run("app", compute.args)
+    assert compute.executed == []
+    assert compute.sent == []
+    assert compute.args.task_scope_outcome is None
+    assert not (pipeline.directory / "result.json").exists()
+    pipeline.sleep.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["missing_session", "old_format", "different_session"])
+def test_fresh_push_rejects_invalid_origin_session_before_submission(session_pipeline, failure):
+    pipeline = session_pipeline
+    result = Shareable({"weight": 3})
+    result.set_header(ReservedHeaderKey.TASK_ID, "task-1")
+    result.set_header(ReservedHeaderKey.TASK_NAME, "train")
+    write_artifact(
+        str(pipeline.directory), pipeline.attempt, "job-1", "result", "train", "task-1", result, task_ssid="session-1"
+    )
+    manifest_path = pipeline.directory / "result.json"
+    manifest = json.loads(manifest_path.read_text())
+    if failure == "missing_session":
+        manifest.pop("task_ssid")
+    elif failure == "old_format":
+        manifest["version"] = 1
+    manifest_path.write_text(json.dumps(manifest))
+    push = pipeline.make_phase(PUSH, session="session-2" if failure == "different_session" else "session-1")
+    with pytest.raises(RuntimeError, match="client execution failed"):
+        push.runner.run("app", push.args)
+    assert push.args.task_scope_outcome is None
+    assert push.sent == []
+    pipeline.sleep.assert_not_called()
+
+
+def test_session_change_before_retry_fails_instead_of_repeating_invalid_session(session_pipeline):
+    pipeline = session_pipeline
+    for phase in (PULL, COMPUTE):
+        current = pipeline.make_phase(phase)
+        current.runner.run("app", current.args)
+    push = pipeline.make_phase(PUSH)
+
+    def first_send_changes_session(**kwargs):
+        assert kwargs["topic"] == ServerCommandNames.SUBMIT_UPDATE
+        kwargs["request"].set_header(MessageHeaderKey.PAYLOAD_LEN, 128)
+        push.sent.append(kwargs)
+        push.client.ssid = "session-2"
+        return new_cell_message({MessageHeaderKey.RETURN_CODE: CellReturnCode.COMM_ERROR}, Shareable())
+
+    push.cell.send_request.side_effect = first_send_changes_session
+    pipeline.sleep.side_effect = [None, AssertionError("permanent session mismatch retried")]
+    with pytest.raises(RuntimeError, match="client execution failed") as failure:
+        push.runner.run("app", push.args)
+    assert "session" in str(failure.value.__cause__).lower() or "ssid" in str(failure.value.__cause__).lower()
+    assert push.args.task_scope_outcome is None
+    assert len(push.sent) == 1
+    pipeline.sleep.assert_called_once()
