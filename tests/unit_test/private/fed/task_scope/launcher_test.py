@@ -60,6 +60,7 @@ def test_common_worker_bootstrap_is_attempt_scoped_and_restored_on_launch_failur
         JobProcessArgs.OPTIONS: ("--set", "existing=value"),
     }
     fl_ctx.set_prop(FLContextKey.JOB_PROCESS_ARGS, original, private=True, sticky=False)
+    fl_ctx.set_prop(PHASE_OPTION, PUSH, private=True, sticky=False)
     directory = tmp_path / "directory with spaces"
 
     def fail():
@@ -70,12 +71,31 @@ def test_common_worker_bootstrap_is_attempt_scoped_and_restored_on_launch_failur
             "existing": "value",
             ATTEMPT_OPTION: "attempt-1",
             DIRECTORY_OPTION: str(directory),
+            PHASE_OPTION: PULL,
         }
+        assert fl_ctx.get_prop(PHASE_OPTION) == PULL
         raise RuntimeError("physical launch failed")
 
     with pytest.raises(RuntimeError, match="physical launch failed"):
-        launch_task_scope_worker(fail, fl_ctx, "attempt-1", str(directory))
+        launch_task_scope_worker(fail, fl_ctx, "attempt-1", str(directory), PULL)
     assert fl_ctx.get_prop(FLContextKey.JOB_PROCESS_ARGS) is original
+    assert fl_ctx.get_prop(PHASE_OPTION) == PUSH
+
+
+@pytest.mark.parametrize("phase", [None, "", "whole-task", 1])
+def test_worker_bootstrap_rejects_missing_or_invalid_phase_before_launch(tmp_path, phase):
+    fl_ctx = FLContext()
+    original = {JobProcessArgs.OPTIONS: ("--set", "existing=value")}
+    fl_ctx.set_prop(FLContextKey.JOB_PROCESS_ARGS, original, private=True, sticky=False)
+    fl_ctx.set_prop(PHASE_OPTION, COMPUTE, private=True, sticky=False)
+    physical_launch = Mock()
+
+    with pytest.raises(ValueError, match="invalid task phase"):
+        launch_task_scope_worker(physical_launch, fl_ctx, "attempt-1", str(tmp_path), phase)
+
+    physical_launch.assert_not_called()
+    assert fl_ctx.get_prop(FLContextKey.JOB_PROCESS_ARGS) is original
+    assert fl_ctx.get_prop(PHASE_OPTION) == COMPUTE
 
 
 def test_attempts_settle_and_publish_receipts_before_relaunch(tmp_path):
@@ -87,16 +107,25 @@ def test_attempts_settle_and_publish_receipts_before_relaunch(tmp_path):
     handle = TaskScopedJobHandle("job-1", str(tmp_path / "job-1"), probe, Mock())
 
     class Allocation:
-        def __init__(self, attempt, directory):
+        def __init__(self, attempt, directory, phase):
             self.attempt = attempt
             self.directory = directory
+            self.phase = phase
             self.finished = False
 
         def wait(self):
             if allocations[0] is self:
                 entered.set()
                 assert release.wait(3), "test did not release the first physical worker"
-            write_receipt(self.directory, self.attempt, {STATUS: TASK_COMPLETE, "task_id": self.attempt})
+            write_receipt(
+                str(Path(self.directory, self.phase)),
+                self.attempt,
+                {
+                    STATUS: {PULL: INPUT_READY, COMPUTE: RESULT_READY, PUSH: TASK_COMPLETE}[self.phase],
+                    "task_id": self.attempt,
+                    "phase": self.phase,
+                },
+            )
             self.finished = True
             trace.append("settled")
 
@@ -106,9 +135,9 @@ def test_attempts_settle_and_publish_receipts_before_relaunch(tmp_path):
         def terminate(self):
             release.set()
 
-    def launch(attempt, directory):
+    def launch(attempt, directory, phase):
         assert all(a.finished for a in allocations), "physical workers must not overlap"
-        allocation = Allocation(attempt, directory)
+        allocation = Allocation(attempt, directory, phase)
         allocations.append(allocation)
         trace.append("launched")
         return allocation
@@ -126,17 +155,20 @@ def test_attempts_settle_and_publish_receipts_before_relaunch(tmp_path):
         thread.join(3)
     assert not thread.is_alive()
     assert handle.poll() == JobReturnCode.SUCCESS
-    assert trace == ["launched", "settled", "launched", "settled"]
-    assert allocations[0].attempt != allocations[1].attempt
+    assert trace == ["launched", "settled"] * 6
+    assert [a.phase for a in allocations] == list(PHASES) * 2
+    assert len({a.attempt for a in allocations[:3]}) == 1
+    assert len({a.attempt for a in allocations[3:]}) == 1
+    assert allocations[0].attempt != allocations[3].attempt
     events = [json.loads(line) for line in Path(handle._root, "events.jsonl").read_text().splitlines()]
     phases = [e["phase"] for e in events if e["phase"] in ("submitting", "allocation_released", "receipt")]
-    assert phases == ["submitting", "allocation_released", "receipt"] * 2
+    assert phases == ["submitting", "allocation_released", "receipt"] * 6
 
 
 def _phased_handle(tmp_path, *, failure=None, missing_receipt=None, idle=False, after_phase=None):
     allocations = []
     probe = Mock(side_effect=[{STATUS: READY, TASK_TOKEN: "one"}, {STATUS: DONE}])
-    handle = TaskScopedJobHandle("job-1", str(tmp_path / "job-1"), probe, Mock(), phased=True)
+    handle = TaskScopedJobHandle("job-1", str(tmp_path / "job-1"), probe, Mock())
 
     class Allocation:
         def __init__(self, attempt, directory, phase):

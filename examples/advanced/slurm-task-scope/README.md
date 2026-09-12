@@ -30,7 +30,7 @@ job. The logical client handle remains active through upload/ACK and idle gaps.
 
 ## Configure production sites
 
-Follow the existing [Slurm launcher setup](../../../docs/user_guide/slurm_job_launcher.rst).
+Follow the existing [Slurm launcher setup](../../../docs/user_guide/admin_guide/deployment/slurm_job_launcher.rst).
 Provision one server and two client startup kits. CP must run without a reserved
 GPU. Each site's workspace must survive worker exit and be mounted at the same
 absolute path on CP and all CPU/GPU nodes. Every process uses the same revision.
@@ -41,7 +41,6 @@ partition, Python path, mounts, and resource-manager settings. Add:
 
 ```json
 {
-  "task_scoped": true,
   "task_phased": true,
   "task_probe_interval": 2.0,
   "task_probe_timeout": 5.0,
@@ -49,15 +48,25 @@ partition, Python path, mounts, and resource-manager settings. Add:
 }
 ```
 
-`task_phased` requires `task_scoped=true`. Pull/push use the job's CPU/memory
+`task_phased` is the only lifecycle switch:
+
+| Setting | Client lifecycle |
+|---|---|
+| `task_phased=false` (default, or omitted) | Original job-lifetime CJ |
+| `task_phased=true` | Phased D: CPU pull → GPU compute → release compute allocation → CPU push |
+
+Pull/push use the job's CPU/memory
 request with no GPU GRES and empty CUDA/ROCm device visibility. Compute uses the
 original resource request. The configured partition must accept CPU allocations;
 this prototype does not select a different partition per phase. Keep the
 existing server launcher configuration.
 
-For comparison, `task_scoped=true, task_phased=false` selects the earlier whole-CJ
-per-task baseline, which retains its GPU through upload and cleanup.
-`task_scoped=false` retains the standard job-lifetime CJ.
+The earlier whole-CJ-per-task baseline is no longer selectable. Remove the old
+`task_scoped` launcher argument from prototype configurations; it is not accepted.
+These are site-level startup settings, not per-job or live toggles. Finish active
+jobs before changing the configuration and restarting CP; parent restart/adoption
+is unsupported. Enabling phased D still requires the server component, shared
+workspace and compatible executors described below.
 
 ## Export and submit the example
 
@@ -154,7 +163,7 @@ result manifest committed
 | Partial artifact / disk failure | No dependent phase; preserve evidence |
 | Push fails or ACK missing | No invented success and no automatic recomputation |
 | Abort idle/pending/running | No later phase; owned allocation cancellation settles |
-| Default launcher control | `task_scoped=false` retains standard behavior |
+| Default launcher control | `task_phased=false` or omitted retains standard behavior |
 
 ## Scope and validation
 

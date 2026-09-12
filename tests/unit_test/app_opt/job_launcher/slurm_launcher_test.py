@@ -100,7 +100,7 @@ def test_resource_resolution_combines_portable_gpu_total():
 @pytest.mark.parametrize("phase,expected_gpus", [(PULL, None), (COMPUTE, 2), (PUSH, None)])
 def test_phased_slurm_requests_gpus_only_for_compute(tmp_path, phase, expected_gpus):
     workspace = _workspace(tmp_path)
-    launcher = _launcher(tmp_path, workspace, task_scoped=True, task_phased=True)
+    launcher = _launcher(tmp_path, workspace, task_phased=True)
     ctx = _fl_ctx(workspace)
     ctx.set_prop(PHASE_OPTION, phase, private=True, sticky=False)
     meta = {

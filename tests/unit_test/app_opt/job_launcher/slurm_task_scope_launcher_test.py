@@ -37,13 +37,20 @@ from nvflare.private.fed.task_scope import launcher as launcher_module
 from nvflare.private.fed.task_scope.launcher import TaskScopedJobHandle
 from nvflare.private.fed.task_scope.protocol import (
     ATTEMPT_OPTION,
+    COMPUTE,
     DIRECTORY_OPTION,
     DONE,
     END_RUN,
     ERROR,
     IDLE,
+    INPUT_READY,
+    PHASE_OPTION,
+    PHASES,
     PROBE_TOPIC,
+    PULL,
+    PUSH,
     READY,
+    RESULT_READY,
     STATUS,
     TASK_COMPLETE,
     TASK_TOKEN,
@@ -100,12 +107,19 @@ class _FakeAllocation:
             assert self.release.wait(3), "test did not release its fake allocation"
         if self.spec.get("on_wait"):
             self.spec["on_wait"](self)
-        receipt = self.spec.get("receipt", {STATUS: TASK_COMPLETE, "task_id": f"task-{self.job_id}"})
+        phase = self.plan.study_env[PHASE_OPTION]
+        receipt = self.spec.get(
+            "receipt",
+            {
+                STATUS: {PULL: INPUT_READY, COMPUTE: RESULT_READY, PUSH: TASK_COMPLETE}[phase],
+                "task_id": f"task-{self.plan.study_env[ATTEMPT_OPTION]}",
+            },
+        )
         if receipt is not None:
             attempt = self.plan.study_env[ATTEMPT_OPTION]
             if self.spec.get("stale_receipt"):
                 attempt = "previous-attempt"
-            write_receipt(self.plan.study_env[DIRECTORY_OPTION], attempt, receipt)
+            write_receipt(str(Path(self.plan.study_env[DIRECTORY_OPTION], phase)), attempt, dict(receipt, phase=phase))
         if "legacy_rc" in self.spec:
             Path(self.plan.run_dir, "_process_rc.txt").write_text(str(self.spec["legacy_rc"]))
         self.finished = True
@@ -159,9 +173,12 @@ def _handle(tmp_path, statuses=(DONE,), specs=()):
             replies.append(_reply(status, f"pending-task-{index}"))
     probe = Mock(side_effect=replies)
 
-    def launch_attempt(attempt, directory):
+    def launch_attempt(attempt, directory, phase):
         attempt_plan = replace(
-            plan, study_env=dict(plan.study_env, **{ATTEMPT_OPTION: attempt, DIRECTORY_OPTION: directory})
+            plan,
+            study_env=dict(
+                plan.study_env, **{ATTEMPT_OPTION: attempt, DIRECTORY_OPTION: directory, PHASE_OPTION: phase}
+            ),
         )
         return manager.launch(attempt_plan)
 
@@ -205,28 +222,24 @@ def test_idle_probes_keep_gpu_unallocated(tmp_path):
 
 
 def test_two_tasks_use_distinct_sequential_allocations_and_matching_receipts(tmp_path):
-    handle, manager, _ = _handle(tmp_path, [WAIT, READY, WAIT, READY, WAIT, DONE], [{}, {}])
+    handle, manager, _ = _handle(tmp_path, [WAIT, READY, WAIT, READY, WAIT, DONE], [{} for _ in range(6)])
     handle.wait()
     assert handle.poll() == JobReturnCode.SUCCESS
-    assert len(manager.allocations) == 2
-    assert [p.job_id for p in manager.plans] == ["job-1", "job-1"]
+    assert len(manager.allocations) == 6
+    assert [p.job_id for p in manager.plans] == ["job-1"] * 6
+    assert [p.study_env[PHASE_OPTION] for p in manager.plans] == list(PHASES) * 2
     assert len({p.study_env[ATTEMPT_OPTION] for p in manager.plans}) == 2
     assert len({p.study_env[DIRECTORY_OPTION] for p in manager.plans}) == 2
     assert all(p.study_env["EXISTING"] == "preserved" for p in manager.plans)
     assert manager.trace == [
-        ("launch", "1000"),
-        ("wait", "1000"),
-        ("released", "1000"),
-        ("launch", "1001"),
-        ("wait", "1001"),
-        ("released", "1001"),
+        (event, str(1000 + index)) for index in range(6) for event in ("launch", "wait", "released")
     ]
     phases = [event["phase"] for event in _events(handle)]
     assert phases.index("allocation_released") < phases.index("receipt")
 
 
 def test_receipt_is_read_only_after_scheduler_wait_confirms_allocation_release(tmp_path, monkeypatch):
-    handle, manager, _ = _handle(tmp_path, [READY, DONE], [{}])
+    handle, manager, _ = _handle(tmp_path, [READY, DONE], [{}, {}, {}])
     real_read = launcher_module.read_receipt
 
     def checked_read(directory, attempt):
@@ -238,7 +251,7 @@ def test_receipt_is_read_only_after_scheduler_wait_confirms_allocation_release(t
     assert handle.poll() == JobReturnCode.SUCCESS
 
 
-@pytest.mark.parametrize("receipt", [None, {STATUS: TASK_COMPLETE, "task_id": "t"}])
+@pytest.mark.parametrize("receipt", [None, {STATUS: INPUT_READY, "task_id": "t"}])
 def test_missing_or_stale_receipt_never_recycles_worker(tmp_path, receipt):
     handle, manager, probe = _handle(tmp_path, [READY, READY, DONE], [{"receipt": receipt, "stale_receipt": True}, {}])
     handle.wait()
@@ -262,7 +275,7 @@ def test_stale_legacy_success_cannot_mask_sbatch_failure(tmp_path):
     handle.wait()
     assert handle.poll() == ProcessExitCode.INFRASTRUCTURE_ERROR
     assert not Path(handle.plan.run_dir, "_process_rc.txt").exists()
-    archives = list(Path(handle.plan.run_dir, ".task_scope").glob("*/previous_process_rc.txt"))
+    archives = list(Path(handle.plan.run_dir, ".task_scope").glob("*/pull/previous_process_rc.txt"))
     assert len(archives) == 1
     assert archives[0].read_text() == "0"
     assert len(manager.plans) == 1
@@ -315,12 +328,25 @@ def test_cancel_active_worker_waits_until_allocation_is_released(tmp_path):
 
 @pytest.mark.parametrize("receipt,expected", [({STATUS: TASK_COMPLETE, "task_id": "t"}, 0), (None, 104)])
 def test_terminal_notice_during_active_allocation_still_requires_exit_and_receipt(tmp_path, receipt, expected):
-    handle, manager, probe = _handle(tmp_path, [READY], [{"block": True, "receipt": receipt}])
+    handle, manager, probe = _handle(
+        tmp_path,
+        [READY],
+        [
+            {"receipt": {STATUS: INPUT_READY, "task_id": "t"}},
+            {"receipt": {STATUS: RESULT_READY, "task_id": "t"}},
+            {"block": True, "receipt": receipt},
+        ],
+    )
     launched = threading.Event()
-    manager.on_launch = lambda allocation: launched.set()
+
+    def on_launch(allocation):
+        if allocation.plan.study_env[PHASE_OPTION] == PUSH:
+            launched.set()
+
+    manager.on_launch = on_launch
     thread = _start(handle)
     assert launched.wait(1)
-    allocation = manager.allocations[0]
+    allocation = manager.allocations[2]
     assert allocation.entered_wait.wait(1)
     handle.notify_terminal(DONE)
     assert handle.poll() == JobReturnCode.UNKNOWN
@@ -329,6 +355,31 @@ def test_terminal_notice_during_active_allocation_still_requires_exit_and_receip
     _join(thread)
     assert handle.poll() == expected
     assert allocation.finished
+    assert probe.call_count == 1
+
+
+@pytest.mark.parametrize("phase", [PULL, COMPUTE])
+def test_terminal_notice_before_push_does_not_claim_result_publication(tmp_path, phase):
+    specs = [{} for _ in PHASES[: PHASES.index(phase)]] + [{"block": True}]
+    handle, manager, probe = _handle(tmp_path, [READY], specs)
+    launched = threading.Event()
+
+    def on_launch(allocation):
+        if allocation.plan.study_env[PHASE_OPTION] == phase:
+            launched.set()
+
+    manager.on_launch = on_launch
+    thread = _start(handle)
+    assert launched.wait(1)
+    allocation = manager.allocations[-1]
+    assert allocation.entered_wait.wait(1)
+    handle.notify_terminal(DONE)
+    assert handle.poll() == JobReturnCode.UNKNOWN
+    allocation.release.set()
+    _join(thread)
+    assert handle.poll() == ProcessExitCode.EXCEPTION
+    assert all(a.finished for a in manager.allocations)
+    assert [p.study_env[PHASE_OPTION] for p in manager.plans] == list(PHASES[: PHASES.index(phase) + 1])
     assert probe.call_count == 1
 
 
@@ -385,12 +436,12 @@ def test_evidence_write_failure_after_submit_still_reclaims_allocation(tmp_path)
 
 
 def test_wait_is_idempotent_after_logical_completion(tmp_path):
-    handle, manager, probe = _handle(tmp_path, [READY, DONE], [{}])
+    handle, manager, probe = _handle(tmp_path, [READY, DONE], [{}, {}, {}])
     handle.wait()
     handle.wait()
     assert handle.poll() == JobReturnCode.SUCCESS
     assert probe.call_count == 2
-    assert len(manager.plans) == 1
+    assert len(manager.plans) == 3
 
 
 def test_explicit_end_run_receipt_finishes_without_another_probe(tmp_path):
@@ -425,22 +476,22 @@ def test_idle_receipt_suppresses_same_task_token_until_new_work_is_advertised(tm
             _reply(READY, "new-work"),
             DONE,
         ],
-        [{"receipt": {STATUS: IDLE}}, {}],
+        [{"receipt": {STATUS: IDLE}}, {}, {}, {}],
     )
     handle.wait()
     assert handle.poll() == JobReturnCode.SUCCESS
-    assert len(manager.plans) == 2
+    assert [p.study_env[PHASE_OPTION] for p in manager.plans] == [PULL, PULL, COMPUTE, PUSH]
     assert all(a.finished for a in manager.allocations)
     assert probe.call_count == 6
 
 
-def _launcher(tmp_path, task_scoped=True):
+def _launcher(tmp_path, **kwargs):
     return ClientSlurmJobLauncher(
         workspace_path=str(tmp_path),
         sandbox="none",
         python_path="/usr/bin/python3",
         executables={name: "/usr/bin/true" for name in ("sbatch", "squeue", "sacct", "scancel")},
-        task_scoped=task_scoped,
+        **kwargs,
     )
 
 
@@ -458,7 +509,7 @@ def _launcher_context():
 
 
 def test_launcher_registers_parent_terminal_endpoint_and_probes_explicit_server_job(tmp_path):
-    launcher = _launcher(tmp_path)
+    launcher = _launcher(tmp_path, task_phased=True)
     plan = _plan(tmp_path)
     launcher._build_launch_plan = Mock(return_value=plan)
     launcher.manager = _FakeSlurmManager()
@@ -490,8 +541,8 @@ def test_launcher_registers_parent_terminal_endpoint_and_probes_explicit_server_
     assert parent_contexts.new_context().get_prop(FLContextKey.CURRENT_JOB_ID) == ""
 
 
-def test_task_scoped_mode_reuses_physical_slurm_launch_and_restores_common_bootstrap(tmp_path, monkeypatch):
-    launcher = _launcher(tmp_path)
+def test_task_phased_mode_reuses_physical_slurm_launch_and_restores_common_bootstrap(tmp_path, monkeypatch):
+    launcher = _launcher(tmp_path, task_phased=True)
     plan = _plan(tmp_path)
     launcher._build_launch_plan = Mock(return_value=plan)
     launcher.manager = Mock()
@@ -510,12 +561,20 @@ def test_task_scoped_mode_reuses_physical_slurm_launch_and_restores_common_boots
     class Allocation:
         job_id = "1234"
 
+        def __init__(self, args):
+            self.options = dict(token.split("=", 1) for token in shlex.split(args[JobProcessArgs.OPTIONS][1]))
+
         def wait(self):
-            options = dict(token.split("=", 1) for token in shlex.split(launches[0][JobProcessArgs.OPTIONS][1]))
+            options = self.options
+            phase = options[PHASE_OPTION]
             write_receipt(
-                options[DIRECTORY_OPTION],
+                str(Path(options[DIRECTORY_OPTION], phase)),
                 options[ATTEMPT_OPTION],
-                {STATUS: TASK_COMPLETE, "task_id": "task-1"},
+                {
+                    STATUS: {PULL: INPUT_READY, COMPUTE: RESULT_READY, PUSH: TASK_COMPLETE}[phase],
+                    "task_id": "task-1",
+                    "phase": phase,
+                },
             )
 
         def poll(self):
@@ -526,20 +585,28 @@ def test_task_scoped_mode_reuses_physical_slurm_launch_and_restores_common_boots
 
     def physical_launch(_launcher, _job_meta, received_ctx):
         launches.append(dict(received_ctx.get_prop(FLContextKey.JOB_PROCESS_ARGS)))
-        return Allocation()
+        allocation = Allocation(launches[-1])
+        assert received_ctx.get_prop(PHASE_OPTION) == allocation.options[PHASE_OPTION]
+        return allocation
 
     monkeypatch.setattr(SlurmJobLauncher, "launch_job", physical_launch)
     handle = launcher.launch_job({}, fl_ctx)
     handle.wait()
 
     assert handle.poll() == JobReturnCode.SUCCESS
-    assert len(launches) == 1
-    assert launches[0][JobProcessArgs.EXE_MODULE][1] == ClientSlurmJobLauncher.EXE_MODULE
+    assert len(launches) == 3
+    assert all(args[JobProcessArgs.EXE_MODULE][1] == ClientSlurmJobLauncher.EXE_MODULE for args in launches)
+    phase_options = [
+        dict(token.split("=", 1) for token in shlex.split(args[JobProcessArgs.OPTIONS][1])) for args in launches
+    ]
+    assert [options[PHASE_OPTION] for options in phase_options] == list(PHASES)
+    assert len({options[ATTEMPT_OPTION] for options in phase_options}) == 1
     assert fl_ctx.get_prop(FLContextKey.JOB_PROCESS_ARGS) is original_args
+    assert fl_ctx.get_prop(PHASE_OPTION) is None
 
 
 def test_launcher_rejects_duplicate_logical_job_without_submitting(tmp_path):
-    launcher = _launcher(tmp_path)
+    launcher = _launcher(tmp_path, task_phased=True)
     launcher._build_launch_plan = Mock(return_value=_plan(tmp_path))
     launcher.manager = _FakeSlurmManager()
     _, fl_ctx = _launcher_context()
@@ -550,7 +617,7 @@ def test_launcher_rejects_duplicate_logical_job_without_submitting(tmp_path):
 
 
 def test_launcher_rejects_multinode_before_creating_logical_job(tmp_path):
-    launcher = _launcher(tmp_path)
+    launcher = _launcher(tmp_path, task_phased=True)
     launcher._build_launch_plan = Mock(return_value=replace(_plan(tmp_path), resources=JobResources(nodes=2)))
     _, fl_ctx = _launcher_context()
     with pytest.raises(SlurmLauncherError, match="single-node"):
@@ -567,7 +634,7 @@ def test_launcher_rejects_multinode_before_creating_logical_job(tmp_path):
     ],
 )
 def test_terminal_endpoint_validates_server_origin_job_and_status(tmp_path, origin, job, status, expected):
-    launcher = _launcher(tmp_path)
+    launcher = _launcher(tmp_path, task_phased=True)
     handle = Mock()
     launcher._task_scope._handles["job-1"] = handle
     message = new_cell_message({MessageHeaderKey.ORIGIN: origin}, Shareable({"job_id": job, STATUS: status}))
@@ -579,20 +646,34 @@ def test_terminal_endpoint_validates_server_origin_job_and_status(tmp_path, orig
         handle.notify_terminal.assert_not_called()
 
 
-def test_default_client_slurm_launcher_still_submits_immediately(tmp_path):
-    launcher = _launcher(tmp_path, task_scoped=False)
+@pytest.mark.parametrize("settings", [{}, {"task_phased": False}], ids=["default", "explicit_false"])
+def test_disabled_client_slurm_launcher_still_submits_immediately(tmp_path, settings):
+    launcher = _launcher(tmp_path, **settings)
     plan = _plan(tmp_path)
     launcher._build_launch_plan = Mock(return_value=plan)
     launcher.manager = Mock()
     _, fl_ctx = _launcher_context()
     assert launcher.launch_job({}, fl_ctx) is launcher.manager.launch.return_value
     launcher.manager.launch.assert_called_once_with(plan)
+    assert launcher.task_phased is False
     assert launcher._task_scope is None
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", [], {}])
+def test_launcher_rejects_nonboolean_task_phased(tmp_path, value):
+    with pytest.raises(ValueError, match="task_phased must be bool"):
+        _launcher(tmp_path, task_phased=value)
+
+
+@pytest.mark.parametrize("value", [False, True])
+def test_launcher_rejects_removed_task_scoped_option(tmp_path, value):
+    with pytest.raises(TypeError, match="unexpected keyword argument 'task_scoped'"):
+        _launcher(tmp_path, task_scoped=value)
 
 
 @pytest.mark.parametrize("result", [JobReturnCode.SUCCESS, JobReturnCode.UNKNOWN])
 def test_job_completed_releases_only_finished_logical_handle(tmp_path, result):
-    launcher = _launcher(tmp_path)
+    launcher = _launcher(tmp_path, task_phased=True)
     handle = Mock()
     handle.poll.return_value = result
     launcher._task_scope._handles["job-1"] = handle
