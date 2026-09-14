@@ -44,7 +44,8 @@ partition, Python path, mounts, and resource-manager settings. Add:
   "task_phased": true,
   "task_probe_interval": 2.0,
   "task_probe_timeout": 5.0,
-  "task_communication_timeout": 120.0
+  "task_communication_timeout": 120.0,
+  "task_transfer_timeout": 600.0
 }
 ```
 
@@ -60,6 +61,17 @@ request with no GPU GRES and empty CUDA/ROCm device visibility. Compute uses the
 original resource request. The configured partition must accept CPU allocations;
 this prototype does not select a different partition per phase. Keep the
 existing server launcher configuration.
+
+The CP continues authenticated server probes while a physical phase is active.
+Sustained server loss for `task_communication_timeout` cancels a still-executing
+phase. Slurm's existing `pending_timeout` remains the only queue deadline. After
+Slurm reports that a pull or push allocation has started,
+`task_transfer_timeout` bounds its execution and transfer; healthy compute has
+no task-scope wall limit. Once push execution finishes, server completion or
+disappearance does not turn delayed Slurm accounting into an execution failure.
+The CP retains ownership until the physical launcher settles, then validates the
+launcher return code and phase receipt. Without an authoritative server terminal
+outcome, the logical job still cannot claim success.
 
 The earlier whole-CJ-per-task baseline is no longer selectable. Remove the old
 `task_scoped` launcher argument from prototype configurations; it is not accepted.
@@ -133,6 +145,8 @@ The CP's logical handle continues to appear in its job list while CJs are absent
 SP/SJ therefore retain participation through phase queues and idle gaps. Actual
 CP loss still invokes existing dead-client policy. Parent restart/adoption,
 retries after a lost ACK, and durable coordinator recovery are not provided.
+An abort closes phase admission immediately. The existing bounded CJ teardown
+grace remains in place, after which any still-active allocation is terminated.
 
 ## Required production evidence
 

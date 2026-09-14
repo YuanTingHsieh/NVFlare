@@ -96,9 +96,11 @@ class TaskScopedJobHandle(JobHandleSpec):
         logger,
         poll_interval=2.0,
         communication_timeout=120.0,
+        transfer_timeout=600.0,
         *,
         launch_attempt=None,
         allocation_details=None,
+        allocation_state=None,
     ):
         self.job_id = job_id
         self.run_dir = run_dir
@@ -106,13 +108,16 @@ class TaskScopedJobHandle(JobHandleSpec):
         self.logger = logger
         self.poll_interval = poll_interval
         self.communication_timeout = communication_timeout
+        self.transfer_timeout = transfer_timeout
         self.launch_attempt = launch_attempt
         self.allocation_details = allocation_details
+        self.allocation_state = allocation_state
         self.active = None
         self.result = None
         self._server_terminal = None
         self._idle_task_token = None
         self._cancel = threading.Event()
+        self._admission_lock = threading.RLock()
         self._lock = threading.RLock()
         self._wait_lock = threading.Lock()
         self._root = os.path.join(run_dir, ".task_scope")
@@ -137,11 +142,16 @@ class TaskScopedJobHandle(JobHandleSpec):
             self.terminate()
 
     def terminate(self):
-        self._cancel.set()
+        self.request_abort()
         with self._lock:
             active = self.active
         if active is not None:
             active.terminate()
+
+    def request_abort(self):
+        """Prevent admission of another physical phase without cutting short current cleanup."""
+        with self._admission_lock:
+            self._cancel.set()
 
     def _terminate_for_heartbeat_cleanup(self):
         # Missing server job is not proof of successful execution/publication.
@@ -161,6 +171,121 @@ class TaskScopedJobHandle(JobHandleSpec):
         """Optional launcher-specific diagnostic identifiers."""
         return self.allocation_details(active) if self.allocation_details else {}
 
+    def _supervise_allocation(self, active, attempt, phase):
+        """Keep server liveness supervision active while the physical handle waits.
+
+        A healthy server permits arbitrarily long compute. Pull and push have a
+        separate execution deadline that begins only when the physical launcher
+        reports them started. After push execution finishes, accounting cleanup
+        has no deadline: this method retains ownership until the launcher settles,
+        then the caller validates the physical return code and receipt.
+        """
+        settled = threading.Event()
+        wait_errors = []
+
+        def wait_for_settlement():
+            try:
+                active.wait()
+            except Exception as e:
+                wait_errors.append(e)
+            finally:
+                settled.set()
+
+        waiter = threading.Thread(
+            target=wait_for_settlement,
+            name=f"task-scope-{self.job_id}-{phase}-wait",
+        )
+        waiter.start()
+        last_response = time.monotonic()
+        transfer_started = None
+        transfer_finished = False
+        terminal_seen = None
+        failure = None
+        interval = min(self.poll_interval, self.communication_timeout)
+
+        def cancel(code, reason):
+            nonlocal failure
+            if failure is not None:
+                return
+            failure = code
+            self._record("allocation_cancel_requested", attempt=attempt, task_phase=phase, reason=reason)
+            try:
+                active.terminate()
+            except Exception:
+                self.logger.exception("failed to request cancellation of task-scoped allocation")
+
+        while not settled.wait(interval):
+            # request_abort() only closes phase admission. The existing JobExecutor
+            # cleanup grace decides when terminate() cuts short the active process.
+            if self._cancel.is_set() or failure is not None:
+                continue
+
+            now = time.monotonic()
+            if phase in (PULL, PUSH) and not transfer_finished:
+                try:
+                    has_started, has_finished = (
+                        self.allocation_state(active) if self.allocation_state else (True, False)
+                    )
+                except Exception:
+                    cancel(ProcessExitCode.INFRASTRUCTURE_ERROR, "could not determine task phase execution state")
+                    continue
+                if has_finished:
+                    transfer_finished = True
+                elif has_started and transfer_started is None:
+                    transfer_started = now
+                elif transfer_started is not None and now - transfer_started >= self.transfer_timeout:
+                    cancel(ProcessExitCode.INFRASTRUCTURE_ERROR, f"{phase} phase exceeded its transfer timeout")
+                    continue
+
+            push_reconciling = phase == PUSH and transfer_finished
+            with self._lock:
+                terminal = self._server_terminal
+            if terminal == ERROR:
+                cancel(ProcessExitCode.EXCEPTION, "server reported a terminal error during the active phase")
+                continue
+            if terminal == DONE:
+                if phase != PUSH:
+                    cancel(ProcessExitCode.EXCEPTION, "server completed before required artifact publication")
+                    continue
+                if not push_reconciling:
+                    if terminal_seen is None:
+                        terminal_seen = now
+                    elif now - terminal_seen >= self.communication_timeout:
+                        cancel(ProcessExitCode.EXCEPTION, "push did not settle after server completion")
+                        continue
+
+            try:
+                reply = self.probe()
+            except Exception:
+                reply = None
+            if settled.is_set():
+                break
+            now = time.monotonic()
+            if reply is None:
+                if not push_reconciling and now - last_response >= self.communication_timeout:
+                    cancel(ProcessExitCode.INFRASTRUCTURE_ERROR, "server communication timed out during active phase")
+                continue
+
+            status = reply.get(STATUS) if hasattr(reply, "get") else None
+            if status in (READY, WAIT):
+                last_response = now
+            elif status == DONE:
+                last_response = now
+                with self._lock:
+                    if self._server_terminal != ERROR:
+                        self._server_terminal = DONE
+            elif status == ERROR:
+                with self._lock:
+                    self._server_terminal = ERROR
+                cancel(ProcessExitCode.EXCEPTION, reply.get(REASON, "server rejected active task phase"))
+            else:
+                cancel(ProcessExitCode.INFRASTRUCTURE_ERROR, "invalid server probe response during active phase")
+
+        waiter.join()
+        if wait_errors:
+            raise wait_errors[0]
+        return failure
+
     def _run_allocation(self, attempt, directory, phase):
         receipt_dir = os.path.join(directory, phase)
         os.mkdir(receipt_dir, mode=0o700)
@@ -170,16 +295,20 @@ class TaskScopedJobHandle(JobHandleSpec):
         stale_rc = os.path.join(self.run_dir, "_process_rc.txt")
         if os.path.exists(stale_rc):
             os.replace(stale_rc, os.path.join(receipt_dir, "previous_process_rc.txt"))
-        self._record("submitting", attempt=attempt, **details)
-        active = self._launch_attempt(attempt, directory, phase)
-        with self._lock:
-            self.active = active
+        with self._admission_lock:
+            if self._cancel.is_set():
+                return JobReturnCode.ABORTED, None
+            self._record("submitting", attempt=attempt, **details)
+            active = self._launch_attempt(attempt, directory, phase)
+            with self._lock:
+                self.active = active
         self._record("allocated", attempt=attempt, **details, **self._allocation_details(active))
         if self._cancel.is_set():
             active.terminate()
+        # Keep liveness supervision active, but do not impose a compute wall time.
         # The adapter must settle allocation accounting and artifact cleanup;
         # only then may the same job FQCN and launcher paths be used again.
-        active.wait()
+        supervision_failure = self._supervise_allocation(active, attempt, phase)
         raw_rc = active.poll()
         rc = get_return_code(active, self.job_id, os.path.dirname(self.run_dir), self.logger)
         with self._lock:
@@ -192,6 +321,8 @@ class TaskScopedJobHandle(JobHandleSpec):
             **details,
             **self._allocation_details(active),
         )
+        if supervision_failure is not None:
+            return supervision_failure, None
         if self._cancel.is_set():
             return JobReturnCode.ABORTED, None
         # In this experiment a successful file cannot hide scheduler failure.
@@ -306,13 +437,14 @@ class TaskScopedJobHandle(JobHandleSpec):
 class TaskScopedJobRegistry:
     """CP control endpoints and logical handles, shared by launcher adapters."""
 
-    def __init__(self, poll_interval=2.0, probe_timeout=5.0, communication_timeout=120.0):
-        for value in (poll_interval, probe_timeout, communication_timeout):
+    def __init__(self, poll_interval=2.0, probe_timeout=5.0, communication_timeout=120.0, transfer_timeout=600.0):
+        for value in (poll_interval, probe_timeout, communication_timeout, transfer_timeout):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
                 raise ValueError("task-scope timeouts must be positive numbers")
         self.poll_interval = poll_interval
         self.probe_timeout = probe_timeout
         self.communication_timeout = communication_timeout
+        self.transfer_timeout = transfer_timeout
         self._handles = {}
         self._lock = threading.Lock()
         self._terminal_cell = None
@@ -368,7 +500,7 @@ class TaskScopedJobRegistry:
                     return None
                 return reply
 
-            handle = create_handle(probe, self.poll_interval, self.communication_timeout)
+            handle = create_handle(probe, self.poll_interval, self.communication_timeout, self.transfer_timeout)
             self._handles[job_id] = handle
             return handle
 
@@ -383,13 +515,19 @@ class TaskScopedJobLauncherMixin:
         task_probe_interval=2.0,
         task_probe_timeout=5.0,
         task_communication_timeout=120.0,
+        task_transfer_timeout=600.0,
         **kwargs,
     ):
         if not isinstance(task_phased, bool):
             raise ValueError("task_phased must be bool")
         self.task_phased = task_phased
         self._task_scope = (
-            TaskScopedJobRegistry(task_probe_interval, task_probe_timeout, task_communication_timeout)
+            TaskScopedJobRegistry(
+                task_probe_interval,
+                task_probe_timeout,
+                task_communication_timeout,
+                task_transfer_timeout,
+            )
             if task_phased
             else None
         )
@@ -410,12 +548,15 @@ class TaskScopedJobLauncherMixin:
     def _task_scope_allocation_details(self, handle):
         return {}
 
+    def _task_scope_allocation_state(self, handle):
+        return True, False
+
     def launch_job(self, job_meta, fl_ctx):
         if not self.task_phased:
             return super().launch_job(job_meta, fl_ctx)
         job_id, run_dir = self._prepare_task_scoped_job(job_meta, fl_ctx)
 
-        def create_handle(probe, poll_interval, communication_timeout):
+        def create_handle(probe, poll_interval, communication_timeout, transfer_timeout):
             def launch_attempt(attempt, directory, phase):
                 return launch_task_scope_worker(
                     lambda: super(TaskScopedJobLauncherMixin, self).launch_job(job_meta, fl_ctx),
@@ -432,8 +573,10 @@ class TaskScopedJobLauncherMixin:
                 self.logger,
                 poll_interval,
                 communication_timeout,
+                transfer_timeout,
                 launch_attempt=launch_attempt,
                 allocation_details=self._task_scope_allocation_details,
+                allocation_state=self._task_scope_allocation_state,
             )
 
         return self._task_scope.register(job_id, fl_ctx.get_engine(), create_handle)

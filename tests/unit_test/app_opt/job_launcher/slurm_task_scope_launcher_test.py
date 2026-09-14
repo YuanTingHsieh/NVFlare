@@ -355,7 +355,7 @@ def test_terminal_notice_during_active_allocation_still_requires_exit_and_receip
     _join(thread)
     assert handle.poll() == expected
     assert allocation.finished
-    assert probe.call_count == 1
+    assert probe.call_count >= 1
 
 
 @pytest.mark.parametrize("phase", [PULL, COMPUTE])
@@ -380,7 +380,7 @@ def test_terminal_notice_before_push_does_not_claim_result_publication(tmp_path,
     assert handle.poll() == ProcessExitCode.EXCEPTION
     assert all(a.finished for a in manager.allocations)
     assert [p.study_env[PHASE_OPTION] for p in manager.plans] == list(PHASES[: PHASES.index(phase) + 1])
-    assert probe.call_count == 1
+    assert probe.call_count >= 1
 
 
 def test_probe_loss_fails_without_interpreting_server_disappearance_as_success(tmp_path):

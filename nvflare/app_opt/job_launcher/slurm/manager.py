@@ -385,11 +385,15 @@ class SlurmJobManager:
             if active.status == LookupStatus.UNAVAILABLE:
                 return JobReturnCode.UNKNOWN
             if active.status == LookupStatus.NOT_FOUND:
+                handle._set_execution_finished()
                 return self._poll_accounting(handle)
             record = active.records[0]
             handle.accounting_misses = 0
             if _is_terminal(record.state):
+                handle._set_execution_finished()
                 return self._poll_accounting(handle)
+            if record.state not in _PENDING_STATES:
+                handle._set_execution_started()
             if handle.cancel_requested:
                 self.adapter.cancel(handle.job_id, timeout=self.config.cancel_timeout)
                 return JobReturnCode.UNKNOWN
@@ -447,6 +451,8 @@ class SlurmJobHandle(JobHandleSpec):
         self.user_abort = False
         self.terminal_result = None
         self.pending_started_at = None
+        self.execution_started = False
+        self.execution_finished = False
         self.accounting_last_query = float("-inf")
         self.accounting_misses = 0
 
@@ -460,6 +466,18 @@ class SlurmJobHandle(JobHandleSpec):
             if self.terminal_result is None:
                 self.terminal_result = result
             self.condition.notify_all()
+
+    def _set_execution_started(self) -> None:
+        with self.condition:
+            self.execution_started = True
+
+    def _set_execution_finished(self) -> None:
+        with self.condition:
+            self.execution_finished = True
+
+    def get_execution_state(self) -> tuple[bool, bool]:
+        with self.condition:
+            return self.execution_started, self.execution_finished
 
     def terminate(self):
         if self.terminal_result is None:

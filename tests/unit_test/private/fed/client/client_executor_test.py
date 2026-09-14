@@ -29,6 +29,7 @@ from nvflare.fuel.common.exit_codes import ProcessExitCode
 from nvflare.fuel.f3.cellnet.core_cell import FQCN
 from nvflare.fuel.f3.cellnet.defs import ReturnCode
 from nvflare.private.defs import CellChannel, CellChannelTopic, JobFailureMsgKey
+from nvflare.private.fed.client import client_executor
 from nvflare.private.fed.client.client_engine import ClientEngine
 from nvflare.private.fed.client.client_executor import (
     _ABORT_REQUESTED_KEY,
@@ -38,6 +39,8 @@ from nvflare.private.fed.client.client_executor import (
 )
 from nvflare.private.fed.client.client_status import ClientStatus
 from nvflare.private.fed.client.communicator import Communicator
+from nvflare.private.fed.task_scope.launcher import TaskScopedJobHandle
+from nvflare.private.fed.task_scope.protocol import READY, STATUS, TASK_TOKEN
 
 EXPECTED_REPORTABLE_JOB_FAILURES = {
     ProcessExitCode.EXCEPTION: "exception",
@@ -86,6 +89,61 @@ def test_abort_app_terminates_registered_stopped_job_without_worker_command(hear
     terminate_job.assert_called_once_with(job_handle, "job-1", heartbeat_cleanup)
     job_handle.terminate.assert_not_called()
     client.cell.fire_and_forget.assert_not_called()
+
+
+def test_abort_stopped_task_phased_job_prevents_new_allocation_during_cleanup_grace(tmp_path, monkeypatch):
+    grace_entered = threading.Event()
+    allow_termination = threading.Event()
+    allow_probe = threading.Event()
+    allocation_started = threading.Event()
+
+    def probe():
+        assert allow_probe.wait(3)
+        return {STATUS: READY, TASK_TOKEN: "task-1"}
+
+    logical_handle = TaskScopedJobHandle("job-1", str(tmp_path / "job-1"), probe, MagicMock())
+    logical_handle.launch_attempt = lambda *_args: allocation_started.set()
+    pending_handle = _PendingJobHandle()
+    pending_handle.attach(logical_handle)
+    job_executor = JobExecutor.__new__(JobExecutor)
+    job_executor.client = MagicMock()
+    job_executor.logger = MagicMock()
+    job_executor.lock = threading.Lock()
+    job_executor.run_processes = {
+        "job-1": {
+            RunProcessKey.STATUS: ClientStatus.STOPPED,
+            RunProcessKey.JOB_HANDLE: pending_handle,
+        }
+    }
+    clock = [0.0]
+
+    def grace_sleep(_):
+        grace_entered.set()
+        assert allow_termination.wait(3)
+        clock[0] = 11.0
+
+    monkeypatch.setattr(
+        client_executor,
+        "time",
+        SimpleNamespace(time=lambda: clock[0], sleep=grace_sleep),
+    )
+    lifecycle = threading.Thread(target=logical_handle.wait, daemon=True)
+    abort = threading.Thread(target=job_executor.abort_app, args=("job-1",), daemon=True)
+    lifecycle.start()
+    abort.start()
+    try:
+        assert grace_entered.wait(3)
+        assert job_executor.run_processes["job-1"][_ABORT_REQUESTED_KEY]
+        allow_probe.set()
+        assert not allocation_started.wait(0.1)
+    finally:
+        allow_probe.set()
+        allow_termination.set()
+        abort.join(3)
+        lifecycle.join(3)
+    assert not abort.is_alive()
+    assert not lifecycle.is_alive()
+    assert logical_handle.poll() == JobReturnCode.ABORTED
 
 
 def test_abort_app_does_not_terminate_unregistered_stopped_job():

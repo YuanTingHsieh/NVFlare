@@ -447,8 +447,20 @@ def test_running_allocation_remains_unknown(tmp_path):
     adapter.live = _query(LookupStatus.FOUND, _record())
     handle = _manager(tmp_path, adapter).launch(_plan(tmp_path))
 
+    assert handle.get_execution_state() == (False, False)
     assert handle.poll() == JobReturnCode.UNKNOWN
+    assert handle.get_execution_state() == (True, False)
     assert not any(call[0] == "accounting_id" for call in adapter.calls)
+
+
+def test_finished_execution_is_distinct_from_pending_accounting_cleanup(tmp_path):
+    adapter = Adapter()
+    adapter.live = _query(LookupStatus.NOT_FOUND)
+    adapter.accounting_id = _query(LookupStatus.UNAVAILABLE)
+    handle = _manager(tmp_path, adapter).launch(_plan(tmp_path))
+
+    assert handle.poll() == JobReturnCode.UNKNOWN
+    assert handle.get_execution_state() == (False, True)
 
 
 def test_query_and_cancel_commands_use_site_timeouts(tmp_path):
@@ -647,6 +659,7 @@ def test_pending_timeout_starts_with_first_live_pending_observation(tmp_path, st
     handle = manager.launch(_plan(tmp_path, pending_timeout=5))
 
     assert handle.poll() == JobReturnCode.UNKNOWN
+    assert handle.get_execution_state() == (False, False)
     assert not handle.cancel_requested
     clock.value = 6
     assert handle.poll() == JobReturnCode.UNKNOWN

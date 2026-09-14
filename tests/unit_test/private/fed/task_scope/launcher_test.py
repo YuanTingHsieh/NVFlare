@@ -221,6 +221,234 @@ def test_phased_job_releases_compute_before_submitting_push(tmp_path):
     assert release < push
 
 
+def _supervised_handle(tmp_path, block_phase, server_available, settle_on_terminate=True, start_immediately=True):
+    phase_entered = threading.Event()
+    phase_released = threading.Event()
+    cancel_requested = threading.Event()
+    pipeline_finished = threading.Event()
+    allocations = []
+
+    def probe():
+        if pipeline_finished.is_set():
+            return {STATUS: DONE}
+        if phase_entered.is_set() and not server_available:
+            return None
+        return {STATUS: READY, TASK_TOKEN: "task-1"}
+
+    handle = TaskScopedJobHandle(
+        "job-1",
+        str(tmp_path / "job-1"),
+        probe,
+        Mock(),
+        poll_interval=0.005,
+        communication_timeout=0.03,
+        transfer_timeout=0.03,
+        allocation_state=lambda active: (active.started.is_set(), active.execution_finished.is_set()),
+    )
+
+    class Allocation:
+        def __init__(self, attempt, directory, phase):
+            self.attempt, self.directory, self.phase = attempt, directory, phase
+            self.finished = False
+            self.terminated = False
+            self.started = threading.Event()
+            self.execution_finished = threading.Event()
+            if start_immediately:
+                self.started.set()
+
+        def wait(self):
+            if self.phase == block_phase:
+                phase_entered.set()
+                assert phase_released.wait(3)
+            if not self.terminated:
+                write_receipt(
+                    str(Path(self.directory, self.phase)),
+                    self.attempt,
+                    {
+                        STATUS: {PULL: INPUT_READY, COMPUTE: RESULT_READY, PUSH: TASK_COMPLETE}[self.phase],
+                        "task_id": "task-1",
+                        "phase": self.phase,
+                    },
+                )
+            self.execution_finished.set()
+            self.finished = True
+            if self.phase == PUSH:
+                pipeline_finished.set()
+
+        def poll(self):
+            return JobReturnCode.ABORTED if self.terminated else JobReturnCode.SUCCESS
+
+        def terminate(self):
+            self.terminated = True
+            cancel_requested.set()
+            if settle_on_terminate:
+                phase_released.set()
+
+    def launch(attempt, directory, phase):
+        allocation = Allocation(attempt, directory, phase)
+        allocations.append(allocation)
+        return allocation
+
+    handle.launch_attempt = launch
+    return handle, allocations, phase_entered, phase_released, cancel_requested
+
+
+def test_healthy_server_allows_compute_longer_than_communication_timeout(tmp_path):
+    handle, allocations, compute_entered, release_compute, _ = _supervised_handle(
+        tmp_path, COMPUTE, server_available=True
+    )
+    thread = threading.Thread(target=handle.wait, daemon=True)
+    thread.start()
+    try:
+        assert compute_entered.wait(3)
+        thread.join(0.12)
+        assert thread.is_alive(), "healthy long compute was treated as a communication timeout"
+        assert not any(a.terminated for a in allocations)
+    finally:
+        release_compute.set()
+        thread.join(3)
+    assert not thread.is_alive()
+    assert handle.poll() == JobReturnCode.SUCCESS
+    assert [a.phase for a in allocations] == list(PHASES)
+
+
+def test_healthy_slurm_queue_delay_does_not_consume_transfer_timeout(tmp_path):
+    handle, allocations, pull_entered, release_pull, cancel_requested = _supervised_handle(
+        tmp_path,
+        PULL,
+        server_available=True,
+        start_immediately=False,
+    )
+    thread = threading.Thread(target=handle.wait, daemon=True)
+    thread.start()
+    try:
+        assert pull_entered.wait(3)
+        thread.join(0.12)
+        assert thread.is_alive()
+        assert not cancel_requested.is_set()
+        allocations[0].started.set()
+    finally:
+        release_pull.set()
+        thread.join(3)
+    assert not thread.is_alive()
+    assert handle.poll() == JobReturnCode.SUCCESS
+
+
+def test_launcher_cleanup_delay_does_not_consume_transfer_timeout(tmp_path):
+    handle, allocations, push_entered, finish_cleanup, cancel_requested = _supervised_handle(
+        tmp_path,
+        PUSH,
+        server_available=True,
+        settle_on_terminate=False,
+    )
+    thread = threading.Thread(target=handle.wait, daemon=True)
+    thread.start()
+    try:
+        assert push_entered.wait(3)
+        allocations[-1].execution_finished.set()
+        thread.join(0.12)
+        assert thread.is_alive()
+        assert not cancel_requested.is_set()
+    finally:
+        finish_cleanup.set()
+        thread.join(3)
+    assert not thread.is_alive()
+    assert handle.poll() == JobReturnCode.SUCCESS
+
+
+@pytest.mark.parametrize("completion", ["probe_done", "terminal_notice_then_disappear"])
+def test_completed_push_waits_for_delayed_accounting_after_server_completion(tmp_path, completion):
+    handle, allocations, push_entered, finish_cleanup, cancel_requested = _supervised_handle(
+        tmp_path,
+        PUSH,
+        server_available=True,
+        settle_on_terminate=False,
+    )
+    thread = threading.Thread(target=handle.wait, daemon=True)
+    thread.start()
+    try:
+        assert push_entered.wait(3)
+        allocation = allocations[-1]
+        allocation.execution_finished.set()
+        if completion == "probe_done":
+            handle.probe = lambda: {STATUS: DONE}
+        else:
+            handle.notify_terminal(DONE)
+            handle.probe = lambda: None
+        thread.join(0.12)
+        assert thread.is_alive()
+        assert handle.active is allocation
+        assert not cancel_requested.is_set()
+    finally:
+        finish_cleanup.set()
+        thread.join(3)
+    assert not thread.is_alive()
+    assert handle.poll() == JobReturnCode.SUCCESS
+
+
+def test_completed_push_server_loss_does_not_cancel_accounting_cleanup(tmp_path):
+    handle, allocations, push_entered, finish_cleanup, cancel_requested = _supervised_handle(
+        tmp_path,
+        PUSH,
+        server_available=True,
+        settle_on_terminate=False,
+    )
+    thread = threading.Thread(target=handle.wait, daemon=True)
+    thread.start()
+    try:
+        assert push_entered.wait(3)
+        allocation = allocations[-1]
+        allocation.execution_finished.set()
+        handle.probe = lambda: None
+        thread.join(0.12)
+        assert thread.is_alive()
+        assert handle.active is allocation
+        assert not cancel_requested.is_set()
+    finally:
+        finish_cleanup.set()
+        thread.join(3)
+    assert not thread.is_alive()
+    assert not allocations[-1].terminated
+    # Without an authoritative DONE notice, later server loss still prevents
+    # the logical job from claiming success after the receipt is validated.
+    assert handle.poll() == ProcessExitCode.INFRASTRUCTURE_ERROR
+
+
+@pytest.mark.parametrize("server_available", [False, True], ids=["server_partition", "child_push_stuck"])
+def test_unsettled_push_is_cancelled_with_bounded_failure(tmp_path, server_available):
+    handle, allocations, _, _, _ = _supervised_handle(tmp_path, PUSH, server_available=server_available)
+    handle.wait()
+
+    assert handle.poll() == ProcessExitCode.INFRASTRUCTURE_ERROR
+    assert [a.phase for a in allocations] == list(PHASES)
+    assert allocations[-1].terminated
+    events = [json.loads(line) for line in Path(handle._root, "events.jsonl").read_text().splitlines()]
+    assert any(e["phase"] == "allocation_cancel_requested" and e["task_phase"] == PUSH for e in events)
+    assert any(e["phase"] == "allocation_released" and e["task_phase"] == PUSH for e in events)
+
+
+def test_unconfirmed_scheduler_cleanup_retains_active_allocation_owner(tmp_path):
+    handle, allocations, push_entered, scheduler_settled, cancel_requested = _supervised_handle(
+        tmp_path, PUSH, server_available=False, settle_on_terminate=False
+    )
+    thread = threading.Thread(target=handle.wait, daemon=True)
+    thread.start()
+    try:
+        assert push_entered.wait(3)
+        assert cancel_requested.wait(3)
+        thread.join(0.05)
+        assert thread.is_alive()
+        assert handle.poll() == JobReturnCode.UNKNOWN
+        assert handle.active is allocations[-1]
+        events = [json.loads(line) for line in Path(handle._root, "events.jsonl").read_text().splitlines()]
+        assert not any(e["phase"] == "allocation_released" and e.get("task_phase") == PUSH for e in events)
+    finally:
+        scheduler_settled.set()
+        thread.join(3)
+    assert not thread.is_alive()
+    assert handle.poll() == ProcessExitCode.INFRASTRUCTURE_ERROR
+
+
 @pytest.mark.parametrize("phase", PHASES)
 def test_failed_phase_stops_pipeline_even_with_success_receipt(tmp_path, phase):
     handle, allocations = _phased_handle(tmp_path, failure=phase)
@@ -277,7 +505,7 @@ def test_phase_bootstrap_is_local_to_the_physical_launch(tmp_path, phase):
     assert ctx.get_prop(FLContextKey.JOB_PROCESS_ARGS) is original
 
 
-@pytest.mark.parametrize("field", ["poll_interval", "probe_timeout", "communication_timeout"])
+@pytest.mark.parametrize("field", ["poll_interval", "probe_timeout", "communication_timeout", "transfer_timeout"])
 @pytest.mark.parametrize("value", [0, True, "1"])
 def test_registry_rejects_invalid_timeout(field, value):
     with pytest.raises(ValueError, match="positive numbers"):
@@ -290,8 +518,16 @@ def registered(tmp_path):
     engine = Mock()
     engine.new_context.side_effect = FLContext
 
-    def create(probe, interval, timeout):
-        return TaskScopedJobHandle("job-1", str(tmp_path / "job-1"), probe, Mock(), interval, timeout)
+    def create(probe, interval, communication_timeout, transfer_timeout):
+        return TaskScopedJobHandle(
+            "job-1",
+            str(tmp_path / "job-1"),
+            probe,
+            Mock(),
+            interval,
+            communication_timeout,
+            transfer_timeout,
+        )
 
     handle = registry.register("job-1", engine, create)
     return registry, engine, handle, create

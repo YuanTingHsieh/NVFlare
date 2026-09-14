@@ -577,6 +577,10 @@ class ClientSlurmJobLauncher(TaskScopedJobLauncherMixin, SlurmJobLauncher):
     def _task_scope_allocation_details(self, handle):
         return {"slurm_id": handle.job_id}
 
+    def _task_scope_allocation_state(self, handle):
+        get_state = getattr(type(handle), "get_execution_state", None)
+        return get_state(handle) if callable(get_state) else (True, False)
+
     def get_module_args(self, job_args: dict) -> tuple:
         return _module_args(job_args, get_client_job_args(include_exe_module=False, include_set_options=True))
 

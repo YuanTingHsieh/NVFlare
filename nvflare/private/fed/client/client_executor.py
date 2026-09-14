@@ -56,11 +56,30 @@ class _PendingJobHandle(JobHandleSpec):
         self._lock = threading.Lock()
         self._job_handle = None
         self._pending_heartbeat_cleanup: bool | None = None
+        self._abort_requested = False
 
     def attach(self, job_handle: JobHandleSpec) -> bool | None:
         with self._lock:
             self._job_handle = job_handle
-            return self._pending_heartbeat_cleanup
+            abort_requested = self._abort_requested
+            heartbeat_cleanup = self._pending_heartbeat_cleanup
+        if abort_requested:
+            self._request_abort(job_handle)
+        return heartbeat_cleanup
+
+    @staticmethod
+    def _request_abort(job_handle):
+        request_abort = getattr(type(job_handle), "request_abort", None)
+        if callable(request_abort):
+            request_abort(job_handle)
+
+    def request_abort(self):
+        """Latch abort admission independently of physical process termination."""
+        with self._lock:
+            self._abort_requested = True
+            job_handle = self._job_handle
+        if job_handle is not None:
+            self._request_abort(job_handle)
 
     def terminate(self, heartbeat_cleanup=False):
         with self._lock:
@@ -504,6 +523,12 @@ class JobExecutor(ClientExecutor):
                 job_handle = process.get(RunProcessKey.JOB_HANDLE) if process else None
             if process_status in (ClientStatus.STARTING, ClientStatus.STARTED, ClientStatus.STOPPED):
                 try:
+                    # A task-phased logical handle may be between physical CJs.
+                    # Latch abort before the STOPPED cleanup grace so it cannot
+                    # admit another phase. Resident handles ignore this hook and
+                    # retain their existing graceful-teardown behavior.
+                    if isinstance(job_handle, _PendingJobHandle):
+                        job_handle.request_abort()
                     if process_status == ClientStatus.STARTING:
                         if heartbeat_cleanup:
                             job_handle.terminate(heartbeat_cleanup=True)
