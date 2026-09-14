@@ -32,8 +32,19 @@ job. The logical client handle remains active through upload/ACK and idle gaps.
 
 Follow the existing [Slurm launcher setup](../../../docs/user_guide/admin_guide/deployment/slurm_job_launcher.rst).
 Provision one server and two client startup kits. CP must run without a reserved
-GPU. Each site's workspace must survive worker exit and be mounted at the same
-absolute path on CP and all CPU/GPU nodes. Every process uses the same revision.
+GPU. For this prototype, each site must provide a persistent POSIX workspace
+shared by its CP and every Slurm CPU/GPU execution node, mounted at the same
+absolute path. Pull, compute and push run in separate allocations and exchange
+their artifacts through this directory, so node-local or allocation-ephemeral
+storage cannot be used. Every process uses the same revision.
+
+This is a Slurm-specific requirement of the prototype, not a general NVFlare
+workspace guarantee. The current Kubernetes launcher stages a workspace into a
+pod-local `emptyDir`, and the Docker launcher maps the host job directory to a
+different container path. Consequently, `task_phased=true` does not currently
+support those workspace topologies. Supporting them requires an explicit phase
+artifact handoff through CP or an artifact service, a shared persistent volume,
+or path translation; enabling this flag alone is insufficient.
 
 Keep the existing `nvflare.app_opt.job_launcher.slurm.ClientSlurmJobLauncher` in
 each CP's `local/resources.json`, preserving scheduler commands, account,
