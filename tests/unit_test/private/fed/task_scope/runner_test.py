@@ -33,9 +33,12 @@ from nvflare.apis.fl_constant import (
 from nvflare.apis.fl_context import FLContext, FLContextManager
 from nvflare.apis.shareable import ReservedHeaderKey, Shareable, make_reply
 from nvflare.apis.signal import Signal
+from nvflare.apis.utils.decomposers.flare_decomposers import ContextDecomposer
 from nvflare.apis.utils.event import fire_event_to_components
 from nvflare.fuel.f3.cellnet.defs import MessageHeaderKey
 from nvflare.fuel.f3.cellnet.defs import ReturnCode as CellReturnCode
+from nvflare.fuel.utils import fobs
+from nvflare.fuel.utils.fobs.decomposer import DictDecomposer
 from nvflare.fuel.utils.fobs.decomposers.via_downloader import LazyDownloadRef
 from nvflare.private.defs import SpecialTaskName, new_cell_message
 from nvflare.private.fed.app import job_process_cleanup
@@ -65,12 +68,17 @@ from nvflare.private.fed.task_scope.protocol import (
     read_receipt,
 )
 from nvflare.private.fed.task_scope.runner import TaskScopedClientAppRunner, TaskScopedClientRunner
-from nvflare.private.fed.utils.fed_utils import fobs_initialize
 from nvflare.private.json_configer import ConfigError
 
 
 def _task(name="train", task_id="task-1"):
     return TaskAssignment(name, task_id, Shareable())
+
+
+def _register_artifact_decomposers():
+    """Register exactly what these tests persist, even after another test calls fobs.reset()."""
+    fobs.register(DictDecomposer(Shareable))
+    fobs.register(ContextDecomposer)
 
 
 def _make_runner():
@@ -701,7 +709,7 @@ def test_worker_rejects_incomplete_task_scope_options_before_startup(worker_runt
 
 @pytest.fixture
 def phased(runner, attempt_dir):
-    fobs_initialize()
+    _register_artifact_decomposers()
     directory, attempt = attempt_dir
     runner.job_id = "job-1"
     runner.engine.client.ssid = "session-1"
@@ -1024,7 +1032,7 @@ def session_pipeline(runner, attempt_dir, monkeypatch):
     Lifecycle initialization/cleanup is covered separately above. Each phase here
     has a fresh runner, client, communicator, and FLContextManager, as in a new CJ.
     """
-    fobs_initialize()
+    _register_artifact_decomposers()
     directory, attempt = attempt_dir
     phases = []
     sleep = MagicMock(side_effect=AssertionError("unexpected result retry"))

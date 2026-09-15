@@ -187,8 +187,11 @@ def _handle(tmp_path, statuses=(DONE,), specs=()):
         plan.run_dir,
         probe,
         manager.logger,
-        poll_interval=0.001,
-        communication_timeout=0.05,
+        # A fake allocation normally settles before the first supervision
+        # probe. Leave enough scheduling margin for loaded xdist workers so
+        # the test does not consume a response meant for the logical loop.
+        poll_interval=1.0,
+        communication_timeout=5.0,
         launch_attempt=launch_attempt,
         allocation_details=lambda allocation: {"slurm_id": allocation.job_id},
     )

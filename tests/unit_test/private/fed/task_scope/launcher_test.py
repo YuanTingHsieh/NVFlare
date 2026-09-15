@@ -240,9 +240,11 @@ def _supervised_handle(tmp_path, block_phase, server_available, settle_on_termin
         str(tmp_path / "job-1"),
         probe,
         Mock(),
-        poll_interval=0.005,
-        communication_timeout=0.03,
-        transfer_timeout=0.03,
+        # These tests exercise elapsed-time behavior. Use margins large enough
+        # that an oversubscribed xdist worker cannot manufacture a timeout.
+        poll_interval=0.02,
+        communication_timeout=0.2,
+        transfer_timeout=0.2,
         allocation_state=lambda active: (active.started.is_set(), active.execution_finished.is_set()),
     )
 
@@ -301,7 +303,7 @@ def test_healthy_server_allows_compute_longer_than_communication_timeout(tmp_pat
     thread.start()
     try:
         assert compute_entered.wait(3)
-        thread.join(0.12)
+        thread.join(0.8)
         assert thread.is_alive(), "healthy long compute was treated as a communication timeout"
         assert not any(a.terminated for a in allocations)
     finally:
@@ -323,7 +325,7 @@ def test_healthy_slurm_queue_delay_does_not_consume_transfer_timeout(tmp_path):
     thread.start()
     try:
         assert pull_entered.wait(3)
-        thread.join(0.12)
+        thread.join(0.8)
         assert thread.is_alive()
         assert not cancel_requested.is_set()
         allocations[0].started.set()
@@ -346,7 +348,7 @@ def test_launcher_cleanup_delay_does_not_consume_transfer_timeout(tmp_path):
     try:
         assert push_entered.wait(3)
         allocations[-1].execution_finished.set()
-        thread.join(0.12)
+        thread.join(0.8)
         assert thread.is_alive()
         assert not cancel_requested.is_set()
     finally:
@@ -375,7 +377,7 @@ def test_completed_push_waits_for_delayed_accounting_after_server_completion(tmp
         else:
             handle.notify_terminal(DONE)
             handle.probe = lambda: None
-        thread.join(0.12)
+        thread.join(0.8)
         assert thread.is_alive()
         assert handle.active is allocation
         assert not cancel_requested.is_set()
@@ -400,7 +402,7 @@ def test_completed_push_server_loss_does_not_cancel_accounting_cleanup(tmp_path)
         allocation = allocations[-1]
         allocation.execution_finished.set()
         handle.probe = lambda: None
-        thread.join(0.12)
+        thread.join(0.8)
         assert thread.is_alive()
         assert handle.active is allocation
         assert not cancel_requested.is_set()
