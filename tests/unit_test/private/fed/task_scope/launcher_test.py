@@ -255,11 +255,11 @@ def _supervised_handle(tmp_path, block_phase, server_available, settle_on_termin
             self.terminated = False
             self.started = threading.Event()
             self.execution_finished = threading.Event()
-            if start_immediately:
-                self.started.set()
 
         def wait(self):
             if self.phase == block_phase:
+                if start_immediately:
+                    self.started.set()
                 phase_entered.set()
                 assert phase_released.wait(3)
             if not self.terminated:
@@ -272,6 +272,12 @@ def _supervised_handle(tmp_path, block_phase, server_available, settle_on_termin
                         "phase": self.phase,
                     },
                 )
+            # Non-blocked phases are modelled as completing atomically. Do not
+            # start their synthetic transfer clocks before this waiter thread
+            # gets CPU time: that would turn xdist scheduling delay into a
+            # launcher timeout unrelated to the behavior under test.
+            if self.phase != block_phase and start_immediately:
+                self.started.set()
             self.execution_finished.set()
             self.finished = True
             if self.phase == PUSH:
