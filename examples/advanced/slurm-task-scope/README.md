@@ -152,6 +152,59 @@ task deadlines to cover all three queue/startup periods plus transfer/compute.
 Use `--gpus 0` only for CPU smoke tests. For a crash test, export a new job with
 `--crash-round 1`; the compute CJ exits 1 before checkpointing that round.
 
+## Identity and serialization invariants
+
+`job_id` remains the logical NVFlare run ID. It identifies the client site's
+participation for the whole run, not one physical CJ or Slurm allocation. The CP
+holds one logical task-scope job handle under this ID while any number of
+sequential task attempts and phase allocations come and go.
+
+The prototype uses the following identity hierarchy:
+
+| Scope | Identity |
+|---|---|
+| Logical federation run | `job_id` |
+| Site participating in the run | `(site_name, job_id)` |
+| One local task attempt | `(site_name, job_id, attempt)` |
+| One physical phase CJ | `(site_name, job_id, attempt, phase)` |
+| Assigned server task | `task_id` |
+| Scheduler allocation | Slurm job ID |
+
+Pull, compute and push CJs for the same site and run deliberately reuse the
+existing job Cell FQCN, `site_name.<job_id>`. Attempt, phase and Slurm allocation
+identity are recorded in local artifacts, receipts and diagnostics; they are not
+part of the Cell address and are not visible to the existing task protocol.
+
+Correctness therefore depends on all of these invariants:
+
+1. At most one CJ for a given `(site_name, job_id)` may be active or connecting
+   at a time. Phase allocations and task attempts must never overlap.
+2. CP must observe the current allocation as terminal and fully settled before
+   submitting the next phase that reuses the same Cell FQCN. Allocation exit is
+   assumed to close the old Cell route before that address is reused.
+3. The logical handle, not an individual CJ, owns the site's job lifetime. An
+   expected gap with no CJ must not be interpreted as completion or client-job
+   death.
+4. No workflow may require unsolicited CJ-addressed communication during an
+   idle or inter-phase gap. The built-in SJ endpoint communicates with the
+   persistent CP for readiness and terminal state instead.
+5. Every phase must use the same authenticated job session. Persisted artifacts
+   bind the logical job, task, attempt and session; receipts bind the attempt and
+   phase. A mismatch or stale handoff fails rather than advancing the pipeline.
+6. The shared attempt directory must remain durable and visible at the same
+   absolute path until pull, compute and push have settled.
+
+Consequently, this prototype does not support concurrent task workers for the
+same site and job, overlapping phase startup/teardown, or precise on-wire
+attribution of a delayed message to a physical incarnation. Supporting those
+semantics requires either unique worker Cell identities or communication owned
+by a persistent CP/helper rather than the transient workers.
+
+This restriction is scoped to one `(site_name, job_id)` pair, not to the whole
+site. Different jobs have different job IDs and Cell FQCNs, so their logical
+handles and phase workers may run concurrently subject to the site's normal
+resource-management and scheduler policy.
+
 ## Handoff and lifecycle contract
 
 | Phase | Work | Successful local receipt |
