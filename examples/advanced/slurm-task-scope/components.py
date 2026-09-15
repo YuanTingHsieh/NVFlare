@@ -24,10 +24,11 @@ from nvflare.apis.impl.controller import Controller
 from nvflare.apis.shareable import Shareable, make_reply
 
 
-def _write_json(path, data):
+def _save_counter_checkpoint(path, state):
+    """Atomically save application state needed by the next task incarnation."""
     temporary = path + ".tmp"
     with open(temporary, "w") as stream:
-        json.dump(data, stream, indent=2)
+        json.dump(state, stream, indent=2)
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temporary, path)
@@ -67,7 +68,7 @@ class CheckpointCounterExecutor(Executor):
             "slurm_id": os.environ.get("SLURM_JOB_ID"),
             "finished_at": time.time(),
         }
-        _write_json(path, result)
+        _save_counter_checkpoint(path, result)
         return Shareable(result)
 
 
@@ -113,10 +114,6 @@ class GapController(Controller):
             )
             if len(self.results.get(str(round_number), {})) != len(clients):
                 raise RuntimeError("did not receive all counter results before the task deadline")
-            workspace = fl_ctx.get_prop(FLContextKey.WORKSPACE_OBJECT)
-            _write_json(
-                os.path.join(workspace.get_run_dir(fl_ctx.get_job_id()), "task_scope_results.json"), self.results
-            )
             # Deliberately no standing task: the CP should submit no allocation.
             end = time.monotonic() + self.gap_seconds
             while time.monotonic() < end:

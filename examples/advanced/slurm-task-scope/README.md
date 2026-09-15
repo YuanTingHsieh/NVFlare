@@ -126,6 +126,9 @@ does not run CUDA kernels; use hello-pt for actual training validation. Increase
 task deadlines to cover all three queue/startup periods plus transfer/compute.
 Use `--gpus 0` only for CPU smoke tests. For a crash test, export a new job with
 `--crash-round 1`; the compute CJ exits 1 before checkpointing that round.
+The counter checkpoint is application state carried across rounds and fresh
+compute CJs. It is deliberately separate from the framework's attempt-scoped
+input/result artifacts, which only hand one task from pull to compute to push.
 
 ## Identity and serialization invariants
 
