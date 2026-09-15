@@ -43,6 +43,7 @@ from nvflare.fuel.utils.fobs.decomposers.via_downloader import LazyDownloadRef
 from nvflare.private.defs import SpecialTaskName, new_cell_message
 from nvflare.private.fed.app import job_process_cleanup
 from nvflare.private.fed.app.client import worker_process as worker
+from nvflare.private.fed.client import client_runner as client_runner_module
 from nvflare.private.fed.client.client_app_runner import ClientAppRunner
 from nvflare.private.fed.client.client_engine_executor_spec import TaskAssignment
 from nvflare.private.fed.client.client_run_manager import ClientRunManager
@@ -1036,7 +1037,10 @@ def session_pipeline(runner, attempt_dir, monkeypatch):
     directory, attempt = attempt_dir
     phases = []
     sleep = MagicMock(side_effect=AssertionError("unexpected result retry"))
-    monkeypatch.setattr("nvflare.private.fed.client.client_runner.time.sleep", sleep)
+    real_time = client_runner_module.time
+    # Replacing time.sleep on the shared stdlib module also affects background
+    # download-monitor threads created by other tests in this process.
+    monkeypatch.setattr(client_runner_module, "time", SimpleNamespace(time=real_time.time, sleep=sleep))
 
     def make_phase(phase, session="session-1", mutate_compute_context=False):
         phase_runner = _make_runner()
