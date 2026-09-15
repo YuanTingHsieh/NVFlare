@@ -22,10 +22,12 @@ from nvflare.apis.shareable import ReservedHeaderKey, Shareable, make_reply
 from nvflare.fuel.utils.argument_utils import parse_vars
 from nvflare.fuel.utils.fobs.decomposers.via_downloader import contains_lazy_download_ref
 from nvflare.private.defs import SpecialTaskName
+from nvflare.private.fed.app.fl_conf import create_privacy_manager
 from nvflare.private.fed.client.client_app_runner import ClientAppRunner
 from nvflare.private.fed.client.client_engine_executor_spec import TaskAssignment
 from nvflare.private.fed.client.client_runner import ClientRunner
 from nvflare.private.fed.task_scope.artifacts import read_artifact, write_artifact
+from nvflare.private.fed.task_scope.config import PUBLICATION_ACK_PROP, TaskScopeTransferConfigurator
 from nvflare.private.fed.task_scope.protocol import (
     ATTEMPT_OPTION,
     COMPUTE,
@@ -45,16 +47,15 @@ class TaskScopedClientRunner(ClientRunner):
     """Run one synchronous, eager task in a disposable CJ process.
 
     Every configured executor must declare ``supports_task_scoped_process = True``.
-    This is an application contract: all executors, filters, and handlers must
-    tolerate construction, START_RUN, and END_RUN on every incarnation, including
-    an idle incarnation. State needed by a later task must be restored from the
-    task or durable shared-workspace artifacts before execute() runs. END_RUN
-    events do not represent completion of the logical federated job. The phased
-    variant runs pull, compute, and push in separate incarnations, with inputs and
-    fully filtered results persisted between them. Only push archives workspace
-    results; compute never sends its task result to the server. Send events run
-    in the CPU push process; their handlers must not require a GPU or state from
-    the compute process.
+    The application graph is constructed only for compute; pull uses the framework
+    transfer graph and push adds only explicitly registered publication components.
+    State needed by a later task must be restored from the task or durable
+    shared-workspace artifacts before execute() runs. END_RUN events do not
+    represent completion of the logical federated job. The phased variant runs
+    pull, compute, and push in separate incarnations, with inputs and fully filtered
+    results persisted between them. Only push archives workspace results; compute
+    never sends its task result to the server. Send events run in the CPU push
+    process and observe the real result-submission ACK.
 
     Aux tasks, asynchronous execution, lazy results, and components that rely on
     continuing process-local state are unsupported. A successful outcome records
@@ -80,6 +81,11 @@ class TaskScopedClientRunner(ClientRunner):
                     f"{type(executor).__name__} must declare supports_task_scoped_process=True "
                     "and support per-incarnation START_RUN/END_RUN before using experimental task-scoped execution"
                 )
+            validate = getattr(executor, "validate_task_scoped_process", None)
+            if callable(validate):
+                error = validate()
+                if error:
+                    raise RuntimeError(f"{type(executor).__name__} is incompatible with task-scoped execution: {error}")
 
         # Retain the standard initialization, END_RUN, and streaming cleanup.
         # ClientRunner.run logs and swallows _try_run exceptions, so the sentinel
@@ -90,6 +96,10 @@ class TaskScopedClientRunner(ClientRunner):
         if self._run_abort_requested or self._task_scope_outcome is None:
             raise RuntimeError("task-scoped client aborted without a clean task outcome")
         args.task_scope_outcome = self._task_scope_outcome
+
+    def requires_materialized_task_result(self, task_name):
+        """The compute runner persists and therefore locally consumes the concrete result."""
+        return self._task_scope_phase == COMPUTE
 
     def _try_run(self):
         heartbeat_thread = threading.Thread(target=self._send_job_heartbeat, daemon=True)
@@ -216,6 +226,7 @@ class TaskScopedClientRunner(ClientRunner):
 
     def _submit_result(self, result, task_id, fl_ctx):
         submitted = self._send_task_result(result, task_id, fl_ctx)
+        fl_ctx.set_prop(PUBLICATION_ACK_PROP, submitted is True, private=True, sticky=False)
         self.fire_event(EventType.AFTER_SEND_TASK_RESULT, fl_ctx)
         if not submitted:
             raise RuntimeError(f"task {task_id} did not receive a successful result-submission ACK")
@@ -237,3 +248,23 @@ class TaskScopedClientRunner(ClientRunner):
 
 class TaskScopedClientAppRunner(ClientAppRunner):
     CLIENT_RUNNER_CLASS = TaskScopedClientRunner
+
+    def create_configurator(self, workspace_obj, config_file_name, app_root, args, kv_list):
+        phase = parse_vars(kv_list).get(PHASE_OPTION)
+        if phase in (PULL, PUSH):
+            return TaskScopeTransferConfigurator(
+                workspace_obj=workspace_obj,
+                config_file_name=config_file_name,
+                app_root=app_root,
+                args=args,
+                kv_list=kv_list,
+                include_publication_components=phase == PUSH,
+            )
+        return super().create_configurator(workspace_obj, config_file_name, app_root, args, kv_list)
+
+    def create_privacy_manager(self, workspace, conf):
+        if isinstance(conf, TaskScopeTransferConfigurator):
+            # Scope names remain available for protocol checks, but site filters and
+            # their dependencies are constructed only in compute.
+            return create_privacy_manager(workspace, names_only=True)
+        return super().create_privacy_manager(workspace, conf)

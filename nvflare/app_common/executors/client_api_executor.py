@@ -324,6 +324,17 @@ class ClientAPIExecutor(Executor):
         """Read-only view of the configured mode, for validation and diagnostics."""
         return self._execution_mode
 
+    @property
+    def supports_task_scoped_process(self) -> bool:
+        """Whether this mode supports reconstruction in a disposable compute process."""
+        return self._execution_mode in (ExecutionMode.IN_PROCESS, ExecutionMode.EXTERNAL_PROCESS)
+
+    def validate_task_scoped_process(self):
+        """Return a phase-independent incompatibility reason, if any."""
+        if self._execution_mode == ExecutionMode.EXTERNAL_PROCESS and self._launch_once:
+            return "external_process requires launch_once=False because each compute process owns one task"
+        return None
+
     def handle_event(self, event_type: str, fl_ctx: FLContext):
         if event_type == EventType.START_RUN:
             super().handle_event(event_type, fl_ctx)
@@ -400,6 +411,9 @@ class ClientAPIExecutor(Executor):
     def _requires_materialized_result(task_name: str, fl_ctx: FLContext) -> bool:
         """Whether the active ClientRunner pipeline consumes the concrete Client API result."""
         runner = fl_ctx.get_prop(FLContextKey.RUNNER)
+        runner_requirement = getattr(runner, "requires_materialized_task_result", None)
+        if callable(runner_requirement) and runner_requirement(task_name) is True:
+            return True
         active_task_name = fl_ctx.get_prop(FLContextKey.TASK_NAME)
         if active_task_name != task_name:
             # A client-side workflow controller can call its learn executor directly.

@@ -14,11 +14,14 @@ CP: availability probe → supervise each phase → wait for next task
                   CPU push CJ → existing task-result submission / ACK
 ```
 
-CP handles readiness and physical allocation supervision. Task payloads,
-Executors, filters, Cell communication and publication remain in CJs. Each phase
-builds the full CJ stack, with its own process and Slurm allocation. This retains
-D's application/runtime trust boundary; it does not isolate application code
-from Cell credentials as proposed in A/B.
+CP handles readiness and physical allocation supervision. Task payloads and Cell
+communication remain in CJs, but framework bootstrap selects the component graph
+before constructing it. Pull builds only the transfer runtime. Compute builds the
+application graph containing Executors, Learners and filters. Push builds the
+transfer runtime plus explicitly registered publication components. Each phase
+still has its own process and Slurm allocation. This retains D's application/runtime
+trust boundary; it does not isolate compute application code from Cell credentials
+as proposed in A/B.
 
 All phases use the existing `nvflare.private.fed.app.client.worker_process`
 entrypoint. Its `--set` options select the phase runner and receipt policy;
@@ -66,6 +69,41 @@ partition, Python path, mounts, and resource-manager settings. Add:
 |---|---|
 | `task_phased=false` (default, or omitted) | Original job-lifetime CJ |
 | `task_phased=true` | Phased D: CPU pull → GPU compute → release compute allocation → CPU push |
+
+The framework—not an Executor—selects these phases. An Executor must not import
+the task-scope protocol or branch on pull/push. Pull and push do not construct the
+configured Executor or its Learner dependencies. Compute uses the ordinary client
+configuration and filtering pipeline. The framework-injected `JobLogStreamer` is
+retained in transfer processes so their logs follow the existing streaming path.
+
+An application component that must observe publication can be registered explicitly
+in `config_fed_client.json`:
+
+```json
+{
+  "task_scope_publication": {
+    "components": [
+      {
+        "id": "publication_audit",
+        "path": "custom.PublicationAudit",
+        "args": {}
+      }
+    ]
+  }
+}
+```
+
+The component must be an `FLComponent` and declare
+`supports_task_scope_publication = True`. It and nested dependencies are constructed
+only in push, receive START_RUN/END_RUN there, and observe the real
+BEFORE_SEND_TASK_RESULT, network submission/ACK and AFTER_SEND_TASK_RESULT ordering.
+At AFTER_SEND_TASK_RESULT, the private FLContext property
+`__task_scope_publication_ack` records whether the server acknowledged submission.
+Publication components must be CPU-safe and recover all required state from the
+persisted result or other durable storage. Merely listening for send events in the
+ordinary compute component graph does not migrate a legacy handler. A handler that
+requires both transient trainer memory and the later ACK must be split or given an
+explicit durable state handoff; otherwise the configuration is unsupported.
 
 Pull/push use the job's CPU/memory
 request with no GPU GRES and empty CUDA/ROCm device visibility. Compute uses the
@@ -142,15 +180,20 @@ result-submission ACK, not a new durable server commit protocol. Input/result
 artifacts remain in the job workspace for diagnosis and are not automatically
 retried or deleted after ACK in this prototype.
 
-All components must tolerate construction and START_RUN/END_RUN per phase,
-including CPU phases that never execute a task. Every Executor must declare
-`supports_task_scoped_process = True`; this is an author assertion, not a proof.
-Cross-task state belongs in the task or durable workspace. Data/result filters
-and execution events run in compute. BEFORE_SEND/AFTER_SEND run in push; handlers
-there cannot require GPUs. No in-memory FLContext or component state is carried
-between phases. Pull and compute retain process cleanup but defer workspace
-upload to push. Per-process logs/events are not a new final-log completeness
-protocol.
+Every Executor must declare `supports_task_scoped_process = True`; this is an
+author assertion, not a proof. Cross-task state belongs in the task or durable
+workspace. Data/result filters and execution events run in compute.
+BEFORE_SEND/AFTER_SEND run in push with the explicitly registered publication
+graph. No in-memory FLContext or component state is carried between compute and
+publication. Pull and compute retain process cleanup but defer workspace upload
+to push. Per-process logs/events are not a new final-log completeness protocol.
+
+`ClientAPIExecutor` supports task-scoped compute in `in_process` mode and in
+`external_process` mode with `launch_once=False`. The latter launches and tears
+down its managed trainer inside each compute process. Attach and external
+`launch_once=True` retain process/session state and are rejected. The Client API
+executor remains unaware of pull and push; the compute runner's generic local
+result-consumer contract materializes external results before artifact commit.
 
 The CP's logical handle continues to appear in its job list while CJs are absent.
 SP/SJ therefore retain participation through phase queues and idle gaps. Actual
@@ -196,9 +239,10 @@ The shared lifecycle lives in `nvflare/private/fed/task_scope/`; the existing
 Slurm launcher supplies physical handles and GPU-free transfer resource plans.
 No new scheduler implementation is introduced. Single-node allocations and
 eager, synchronous ordinary broadcast/send tasks are supported. Multi-node/DDP,
-lazy/pass-through results, Attach, CCWF/aux tasks and unchanged stateful legacy
-Executors are outside this prototype. Full CJs still initialize on CPU nodes;
-applications that allocate GPUs unconditionally at initialization must adapt.
+unresolved lazy/pass-through results, Attach, CCWF/aux tasks and unchanged
+stateful legacy Executors are outside this prototype. CPU transfer CJs initialize
+only framework transport/logging components and explicitly registered publication
+components; the application graph is confined to compute.
 
 Tests under `tests/unit_test/private/fed/task_scope/` and
 `tests/unit_test/app_opt/job_launcher/` check handoffs, phase ordering, rejection,

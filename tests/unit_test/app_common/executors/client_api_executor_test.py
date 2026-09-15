@@ -151,6 +151,29 @@ class TestConstructorValidation:
         assert isinstance(executor, Executor)
         assert executor._execution_mode == kwargs["execution_mode"]
 
+    @pytest.mark.parametrize("mode", [ExecutionMode.IN_PROCESS, ExecutionMode.EXTERNAL_PROCESS])
+    def test_managed_modes_declare_task_scoped_compute_support(self, mode):
+        assert ClientAPIExecutor(**MODE_KWARGS[mode]).supports_task_scoped_process is True
+
+    def test_attach_does_not_declare_task_scoped_compute_support(self):
+        assert ClientAPIExecutor(**MODE_KWARGS[ExecutionMode.ATTACH]).supports_task_scoped_process is False
+
+    def test_external_task_scoped_validation_requires_per_task_launch(self):
+        launch_once = ClientAPIExecutor(
+            execution_mode=ExecutionMode.EXTERNAL_PROCESS,
+            command="python custom/train.py",
+            launch_once=True,
+        )
+        launch_per_task = ClientAPIExecutor(
+            execution_mode=ExecutionMode.EXTERNAL_PROCESS,
+            command="python custom/train.py",
+            launch_once=False,
+        )
+
+        assert "launch_once=False" in launch_once.validate_task_scoped_process()
+        assert launch_per_task.validate_task_scoped_process() is None
+        assert ClientAPIExecutor(**MODE_KWARGS[ExecutionMode.IN_PROCESS]).validate_task_scoped_process() is None
+
     def test_external_process_default_launch_timeout_is_bounded(self):
         executor = ClientAPIExecutor(execution_mode="external_process", command="python custom/train.py")
 
@@ -568,6 +591,35 @@ class TestBackendPlumbing:
         reply = executor.execute("train", Shareable(), fl_ctx, Signal())
         assert reply is backend.result
         assert ("execute", "train") in backend.calls
+
+    def test_execute_materializes_result_for_framework_local_consumer(self):
+        backend = _StubBackend()
+        backend.result = Shareable({"weight": LazyDownloadRef("trainer", "ref-1", "T0")})
+        executor = ClientAPIExecutor(execution_mode="external_process", command="python custom/train.py")
+        executor._backend = backend
+        engine = Mock()
+        engine.get_all_components.return_value = {}
+        cell = engine.get_cell.return_value
+        cell.get_fqcn.return_value = "site-1.job-1"
+        runner = Mock()
+        runner.requires_materialized_task_result.return_value = True
+        fl_ctx = _make_fl_ctx(engine)
+        fl_ctx.set_prop(FLContextKey.TASK_NAME, "train", private=True, sticky=False)
+        fl_ctx.set_prop(FLContextKey.RUNNER, runner, private=True, sticky=False)
+        task = Shareable()
+        materialized = Shareable({"weight": "concrete"})
+
+        with patch(
+            "nvflare.app_common.executors.client_api_executor.materialize_lazy_download_refs",
+            return_value=materialized,
+        ) as resolve:
+            reply = executor.execute("train", task, fl_ctx, Signal())
+
+        assert reply is materialized
+        assert task.get_header(FOBSContextKey.RECEIVER_IDS) == ["site-1.job-1"]
+        runner.requires_materialized_task_result.assert_called_once_with("train")
+        engine.get_all_components.assert_not_called()
+        resolve.assert_called_once()
 
     def test_execute_materializes_result_for_declared_component(self):
         backend = _StubBackend()

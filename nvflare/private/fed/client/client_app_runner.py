@@ -106,7 +106,7 @@ class ClientAppRunner(Runner):
         self._set_fl_context(fl_ctx, app_root, args, workspace, secure_train)
         client_config_file_name = os.path.join(app_root, args.client_config)
         args.set.append(f"secure_train={secure_train}")
-        conf = ClientJsonConfigurator(
+        conf = self.create_configurator(
             workspace_obj=workspace,
             config_file_name=client_config_file_name,
             app_root=app_root,
@@ -121,7 +121,7 @@ class ClientAppRunner(Runner):
         runner_config = conf.runner_config
 
         # configure privacy control!
-        privacy_manager = create_privacy_manager(workspace, names_only=False)
+        privacy_manager = self.create_privacy_manager(workspace, conf)
         if privacy_manager.is_policy_defined():
             if privacy_manager.components:
                 for cid, comp in privacy_manager.components.items():
@@ -147,6 +147,20 @@ class ClientAppRunner(Runner):
 
             # self.start_command_agent(args, client_runner, federated_client, fl_ctx)
         return client_runner
+
+    def create_configurator(self, workspace_obj, config_file_name, app_root, args, kv_list):
+        """Create the application configurator for this runner lifecycle."""
+        return ClientJsonConfigurator(
+            workspace_obj=workspace_obj,
+            config_file_name=config_file_name,
+            app_root=app_root,
+            args=args,
+            kv_list=kv_list,
+        )
+
+    def create_privacy_manager(self, workspace, conf):
+        """Create the privacy manager required by this runner lifecycle."""
+        return create_privacy_manager(workspace, names_only=False)
 
     def create_run_manager(self, args, conf, federated_client, workspace):
         return ClientRunManager(

@@ -14,12 +14,14 @@
 
 import json
 import threading
+from argparse import Namespace
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, sentinel
 
 import pytest
 
 from nvflare.apis.event_type import EventType
+from nvflare.apis.fl_component import FLComponent
 from nvflare.apis.fl_constant import (
     FilterKey,
     FLContextKey,
@@ -31,6 +33,7 @@ from nvflare.apis.fl_constant import (
 from nvflare.apis.fl_context import FLContext, FLContextManager
 from nvflare.apis.shareable import ReservedHeaderKey, Shareable, make_reply
 from nvflare.apis.signal import Signal
+from nvflare.apis.utils.event import fire_event_to_components
 from nvflare.fuel.f3.cellnet.defs import MessageHeaderKey
 from nvflare.fuel.f3.cellnet.defs import ReturnCode as CellReturnCode
 from nvflare.fuel.utils.fobs.decomposers.via_downloader import LazyDownloadRef
@@ -45,6 +48,7 @@ from nvflare.private.fed.client.communicator import Communicator
 from nvflare.private.fed.client.fed_client import FederatedClient
 from nvflare.private.fed.task_scope import runner as runner_module
 from nvflare.private.fed.task_scope.artifacts import read_artifact, write_artifact
+from nvflare.private.fed.task_scope.config import PUBLICATION_ACK_PROP, TaskScopeTransferConfigurator
 from nvflare.private.fed.task_scope.protocol import (
     ATTEMPT_OPTION,
     COMPUTE,
@@ -62,6 +66,7 @@ from nvflare.private.fed.task_scope.protocol import (
 )
 from nvflare.private.fed.task_scope.runner import TaskScopedClientAppRunner, TaskScopedClientRunner
 from nvflare.private.fed.utils.fed_utils import fobs_initialize
+from nvflare.private.json_configer import ConfigError
 
 
 def _task(name="train", task_id="task-1"):
@@ -301,6 +306,19 @@ def test_every_executor_must_explicitly_declare_restart_safety(runner, executor)
     assert args.task_scope_outcome is None
 
 
+def test_executor_task_scope_validation_fails_before_runner_start(runner):
+    args = SimpleNamespace()
+    executor = runner.task_router.task_table["train"]
+    executor.validate_task_scoped_process = MagicMock(return_value="launch setting retains process state")
+
+    with pytest.raises(RuntimeError, match="launch setting retains process state"):
+        runner.run("app", args)
+
+    executor.validate_task_scoped_process.assert_called_once_with()
+    runner.init_run.assert_not_called()
+    runner.engine.get_task_assignment.assert_not_called()
+
+
 def test_aux_task_is_rejected_without_invoking_executor(runner):
     result = runner._handle_do_task("do_task", Shareable(), FLContext())
 
@@ -311,6 +329,190 @@ def test_aux_task_is_rejected_without_invoking_executor(runner):
 def test_default_client_runner_selection_is_unchanged():
     assert ClientAppRunner.CLIENT_RUNNER_CLASS is ClientRunner
     assert TaskScopedClientAppRunner.CLIENT_RUNNER_CLASS is TaskScopedClientRunner
+
+
+@pytest.mark.parametrize("phase", [PULL, PUSH])
+def test_framework_selects_transfer_graph_before_application_configuration(phase):
+    app_runner = TaskScopedClientAppRunner()
+    args = SimpleNamespace(set=[f"{PHASE_OPTION}={phase}"])
+
+    with patch.object(runner_module, "TaskScopeTransferConfigurator", return_value=sentinel.config) as factory:
+        result = app_runner.create_configurator(
+            workspace_obj=sentinel.workspace,
+            config_file_name="config_fed_client.json",
+            app_root="app",
+            args=args,
+            kv_list=args.set,
+        )
+
+    assert result is sentinel.config
+    factory.assert_called_once_with(
+        workspace_obj=sentinel.workspace,
+        config_file_name="config_fed_client.json",
+        app_root="app",
+        args=args,
+        kv_list=args.set,
+        include_publication_components=phase == PUSH,
+    )
+
+
+@pytest.mark.parametrize("phase", [None, COMPUTE])
+def test_compute_and_unphased_lifecycles_keep_normal_application_configuration(phase):
+    app_runner = TaskScopedClientAppRunner()
+    values = [] if phase is None else [f"{PHASE_OPTION}={phase}"]
+    args = SimpleNamespace(set=values)
+
+    with patch.object(ClientAppRunner, "create_configurator", return_value=sentinel.config) as factory:
+        result = app_runner.create_configurator(
+            workspace_obj=sentinel.workspace,
+            config_file_name="config_fed_client.json",
+            app_root="app",
+            args=args,
+            kv_list=args.set,
+        )
+
+    assert result is sentinel.config
+    factory.assert_called_once()
+
+
+def _transfer_configurator(tmp_path, config, include_publication_components):
+    config_file = tmp_path / "config_fed_client.json"
+    config_file.write_text(json.dumps(config))
+    args = Namespace(
+        sp_scheme="grpc",
+        sp_target="localhost:8002",
+        client_name="site-1",
+        parent_url=None,
+        job_id="job-1",
+        workspace=str(tmp_path),
+    )
+    workspace = SimpleNamespace(
+        get_app_custom_dir=lambda job_id: str(tmp_path / job_id / "custom"),
+        get_app_config_dir=lambda job_id: str(tmp_path / job_id / "config"),
+    )
+    return TaskScopeTransferConfigurator(
+        workspace_obj=workspace,
+        config_file_name=str(config_file),
+        args=args,
+        app_root=str(tmp_path),
+        include_publication_components=include_publication_components,
+    )
+
+
+def test_pull_transfer_configuration_never_builds_application_graph(tmp_path):
+    configurator = _transfer_configurator(
+        tmp_path,
+        {
+            "format_version": 2,
+            "executors": [
+                {
+                    "tasks": ["train"],
+                    "executor": {"path": "application.phase_unaware.TrainerThatMustNotBeConstructed"},
+                }
+            ],
+            "components": [{"id": "learner", "path": "application.LearnerThatMustNotBeConstructed"}],
+        },
+        include_publication_components=False,
+    )
+
+    configurator.configure()
+
+    assert configurator.runner_config.task_router.task_table == {}
+    assert configurator.runner_config.components == {}
+    assert configurator.runner_config.handlers == []
+
+
+class _PublicationHook(FLComponent):
+    supports_task_scope_publication = True
+
+    def __init__(self):
+        super().__init__()
+        self.observed = []
+
+    def handle_event(self, event_type, fl_ctx):
+        self.observed.append((event_type, fl_ctx.get_prop(PUBLICATION_ACK_PROP)))
+
+
+def test_push_builds_only_explicit_publication_components(tmp_path):
+    configurator = _transfer_configurator(
+        tmp_path,
+        {
+            "format_version": 2,
+            "executors": [
+                {
+                    "tasks": ["train"],
+                    "executor": {"path": "application.phase_unaware.TrainerThatMustNotBeConstructed"},
+                }
+            ],
+            "task_scope_publication": {
+                "components": [
+                    {
+                        "id": "publisher",
+                        "path": "tests.unit_test.private.fed.task_scope.runner_test._PublicationHook",
+                    }
+                ]
+            },
+        },
+        include_publication_components=True,
+    )
+
+    configurator.configure()
+
+    hook = configurator.runner_config.components["publisher"]
+    assert hook.supports_task_scope_publication is True
+    assert configurator.runner_config.task_router.task_table == {}
+    assert configurator.runner_config.components == {"publisher": hook}
+    assert configurator.runner_config.handlers == [hook]
+
+
+def test_transfer_builds_framework_log_streamer_but_not_other_application_components(tmp_path):
+    configurator = _transfer_configurator(
+        tmp_path,
+        {
+            "format_version": 2,
+            "components": [
+                {
+                    "id": "auto_log_streamer",
+                    "path": "nvflare.app_common.logging.job_log_streamer.JobLogStreamer",
+                },
+                {"id": "learner", "path": "application.LearnerThatMustNotBeConstructed"},
+            ],
+        },
+        include_publication_components=False,
+    )
+    log_streamer = _PublicationHook()
+    configurator.authorize_and_build_component = MagicMock(return_value=log_streamer)
+
+    configurator.configure()
+
+    configurator.authorize_and_build_component.assert_called_once()
+    assert configurator.runner_config.components == {"auto_log_streamer": log_streamer}
+
+
+def test_publication_component_requires_explicit_capability(tmp_path):
+    configurator = _transfer_configurator(
+        tmp_path,
+        {
+            "format_version": 2,
+            "task_scope_publication": {"components": [{"id": "publisher", "path": "application.LegacySendHandler"}]},
+        },
+        include_publication_components=True,
+    )
+    configurator.authorize_and_build_component = MagicMock(return_value=FLComponent())
+
+    with pytest.raises(ConfigError, match="supports_task_scope_publication=True"):
+        configurator.configure()
+
+
+def test_transfer_privacy_policy_does_not_construct_filter_graph():
+    app_runner = TaskScopedClientAppRunner()
+    conf = object.__new__(TaskScopeTransferConfigurator)
+
+    with patch.object(runner_module, "create_privacy_manager", return_value=sentinel.manager) as create:
+        result = app_runner.create_privacy_manager(sentinel.workspace, conf)
+
+    assert result is sentinel.manager
+    create.assert_called_once_with(sentinel.workspace, names_only=True)
 
 
 @pytest.fixture
@@ -672,15 +874,24 @@ def test_push_only_submits_persisted_payload_and_requires_ack(runner, phased, ac
     result.set_header(ReservedHeaderKey.TASK_ID, "task-1")
     write_artifact(str(directory), attempt, runner.job_id, "result", "train", "task-1", result, task_ssid="session-1")
 
+    order = []
+
+    def fire_event(event, context):
+        if event == EventType.AFTER_SEND_TASK_RESULT:
+            assert context.get_prop(PUBLICATION_ACK_PROP) is ack
+        order.append(event)
+
     def submit(data, task_id, context):
         assert data["weight"] == 7
         assert task_id == context.get_prop(FLContextKey.TASK_ID) == "task-1"
         assert context.get_prop(FLContextKey.TASK_NAME) == "train"
+        order.append("ack" if ack else "send_failed")
         if ack:
             # Normal END_RUN can arrive as soon as the last result is accepted.
             runner._handle_end_run("end_run", Shareable(), context)
         return ack
 
+    runner.fire_event.side_effect = fire_event
     runner._send_task_result.side_effect = submit
     args = phase_args(PUSH)
     if ack:
@@ -696,6 +907,51 @@ def test_push_only_submits_persisted_payload_and_requires_ack(runner, phased, ac
     assert [call.args[0] for call in runner.fire_event.call_args_list] == [
         EventType.BEFORE_SEND_TASK_RESULT,
         EventType.AFTER_SEND_TASK_RESULT,
+    ]
+    assert order == [
+        EventType.BEFORE_SEND_TASK_RESULT,
+        "ack" if ack else "send_failed",
+        EventType.AFTER_SEND_TASK_RESULT,
+    ]
+
+
+@pytest.mark.parametrize("ack", [False, True])
+def test_configured_publication_hook_observes_real_send_outcome(runner, phased, tmp_path, ack):
+    configurator = _transfer_configurator(
+        tmp_path,
+        {
+            "format_version": 2,
+            "task_scope_publication": {
+                "components": [
+                    {
+                        "id": "publisher",
+                        "path": "tests.unit_test.private.fed.task_scope.runner_test._PublicationHook",
+                    }
+                ]
+            },
+        },
+        include_publication_components=True,
+    )
+    configurator.configure()
+    hook = configurator.runner_config.components["publisher"]
+    runner.fire_event.side_effect = lambda event, ctx: fire_event_to_components(
+        event, configurator.runner_config.handlers, ctx
+    )
+    runner._send_task_result.return_value = ack
+
+    directory, attempt, phase_args = phased
+    result = Shareable({"weight": 7})
+    write_artifact(str(directory), attempt, runner.job_id, "result", "train", "task-1", result, task_ssid="session-1")
+
+    if ack:
+        runner.run("app", phase_args(PUSH))
+    else:
+        with pytest.raises(RuntimeError, match="client execution failed"):
+            runner.run("app", phase_args(PUSH))
+
+    assert hook.observed == [
+        (EventType.BEFORE_SEND_TASK_RESULT, None),
+        (EventType.AFTER_SEND_TASK_RESULT, ack),
     ]
 
 
