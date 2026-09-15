@@ -27,7 +27,7 @@ from nvflare.private.fed.client.client_app_runner import ClientAppRunner
 from nvflare.private.fed.client.client_engine_executor_spec import TaskAssignment
 from nvflare.private.fed.client.client_runner import ClientRunner
 from nvflare.private.fed.task_scope.artifacts import read_artifact, write_artifact
-from nvflare.private.fed.task_scope.config import PUBLICATION_ACK_PROP, TaskScopeTransferConfigurator
+from nvflare.private.fed.task_scope.config import TaskScopeTransferConfigurator
 from nvflare.private.fed.task_scope.protocol import (
     ATTEMPT_OPTION,
     COMPUTE,
@@ -47,15 +47,15 @@ class TaskScopedClientRunner(ClientRunner):
     """Run one synchronous, eager task in a disposable CJ process.
 
     Every configured executor must declare ``supports_task_scoped_process = True``.
-    The application graph is constructed only for compute; pull uses the framework
-    transfer graph and push adds only explicitly registered publication components.
+    The application graph is constructed only for compute; pull and push use the
+    framework-owned transfer graph.
     State needed by a later task must be restored from the task or durable
     shared-workspace artifacts before execute() runs. END_RUN events do not
     represent completion of the logical federated job. The phased variant runs
     pull, compute, and push in separate incarnations, with inputs and fully filtered
     results persisted between them. Only push archives workspace results; compute
     never sends its task result to the server. Send events run in the CPU push
-    process and observe the real result-submission ACK.
+    process, where application publication handlers are not constructed.
 
     Aux DO_TASK RPCs, work that outlives execute(), unresolved lazy results, and
     components that rely on continuing process-local state are unsupported. A
@@ -227,7 +227,6 @@ class TaskScopedClientRunner(ClientRunner):
 
     def _submit_result(self, result, task_id, fl_ctx):
         submitted = self._send_task_result(result, task_id, fl_ctx)
-        fl_ctx.set_prop(PUBLICATION_ACK_PROP, submitted is True, private=True, sticky=False)
         self.fire_event(EventType.AFTER_SEND_TASK_RESULT, fl_ctx)
         if not submitted:
             raise RuntimeError(f"task {task_id} did not receive a successful result-submission ACK")
@@ -259,7 +258,6 @@ class TaskScopedClientAppRunner(ClientAppRunner):
                 app_root=app_root,
                 args=args,
                 kv_list=kv_list,
-                include_publication_components=phase == PUSH,
             )
         return super().create_configurator(workspace_obj, config_file_name, app_root, args, kv_list)
 

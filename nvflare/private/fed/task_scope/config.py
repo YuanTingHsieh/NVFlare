@@ -23,27 +23,18 @@ from nvflare.private.fed.client.client_runner import ClientRunnerConfig, TaskRou
 from nvflare.private.fed_json_config import FedJsonConfigurator
 from nvflare.private.json_configer import ConfigContext, ConfigError
 
-PUBLICATION_SECTION = "task_scope_publication"
-PUBLICATION_COMPONENT_CAPABILITY = "supports_task_scope_publication"
-PUBLICATION_ACK_PROP = "__task_scope_publication_ack"
 FRAMEWORK_TRANSFER_COMPONENT_PATHS = {
     "nvflare.app_common.logging.job_log_streamer.JobLogStreamer",
 }
 
 
 class TaskScopeTransferConfigurator(ClientJsonConfigurator):
-    """Build only the framework transfer graph and explicit publication hooks.
+    """Build only the framework-owned transfer graph.
 
     Pull and push must not construct the application's Executor, Learner, filters,
-    or general component graph. Push may construct components explicitly registered
-    under ``task_scope_publication.components``. These components and their nested
-    dependencies are owned by the push process and receive its real lifecycle and
-    send/ACK events.
+    or general component graph. Publication-specific application handlers are not
+    supported by this first prototype.
     """
-
-    def __init__(self, *args, include_publication_components: bool, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.include_publication_components = include_publication_components
 
     def process_config_element(self, config_ctx: ConfigContext, node):
         element = node.element
@@ -54,11 +45,7 @@ class TaskScopeTransferConfigurator(ClientJsonConfigurator):
             return
 
         if re.search(r"^components\.#[0-9]+$", path) and self._is_framework_transfer_component(element):
-            self._register_component(element, config_ctx, node, require_publication_capability=False)
-            return
-
-        if self.include_publication_components and re.search(rf"^{PUBLICATION_SECTION}\.components\.#[0-9]+$", path):
-            self._register_component(element, config_ctx, node, require_publication_capability=True)
+            self._register_component(element, config_ctx, node)
 
     @staticmethod
     def _is_framework_transfer_component(element):
@@ -67,7 +54,7 @@ class TaskScopeTransferConfigurator(ClientJsonConfigurator):
         class_path = element.get("path") or element.get("class_path") or element.get("name")
         return isinstance(class_path, str) and class_path.split("#", 1)[0] in FRAMEWORK_TRANSFER_COMPONENT_PATHS
 
-    def _register_component(self, element, config_ctx, node, require_publication_capability):
+    def _register_component(self, element, config_ctx, node):
         if not isinstance(element, dict):
             raise ConfigError("task-scope transfer component must be a component configuration")
         component_id = element.get("id")
@@ -81,22 +68,9 @@ class TaskScopeTransferConfigurator(ClientJsonConfigurator):
             raise ConfigError(
                 f'task-scope transfer component "{component_id}" must be an FLComponent, ' f"but got {type(component)}"
             )
-        if require_publication_capability and getattr(component, PUBLICATION_COMPONENT_CAPABILITY, False) is not True:
-            raise ConfigError(
-                f'task-scope publication component "{component_id}" must declare '
-                f"{PUBLICATION_COMPONENT_CAPABILITY}=True"
-            )
         self.components[component_id] = component
 
     def finalize_config(self, config_ctx: ConfigContext):
-        section = self.config_data.get(PUBLICATION_SECTION)
-        if section is not None:
-            if not isinstance(section, dict):
-                raise ConfigError(f'"{PUBLICATION_SECTION}" must be a dictionary')
-            components = section.get("components", [])
-            if not isinstance(components, list):
-                raise ConfigError(f'"{PUBLICATION_SECTION}.components" must be a list')
-
         FedJsonConfigurator.finalize_config(self, config_ctx)
         self.runner_config = ClientRunnerConfig(
             task_router=TaskRouter(),

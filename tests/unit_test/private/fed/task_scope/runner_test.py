@@ -34,7 +34,6 @@ from nvflare.apis.fl_context import FLContext, FLContextManager
 from nvflare.apis.shareable import ReservedHeaderKey, Shareable, make_reply
 from nvflare.apis.signal import Signal
 from nvflare.apis.utils.decomposers.flare_decomposers import ContextDecomposer
-from nvflare.apis.utils.event import fire_event_to_components
 from nvflare.fuel.f3.cellnet.defs import MessageHeaderKey
 from nvflare.fuel.f3.cellnet.defs import ReturnCode as CellReturnCode
 from nvflare.fuel.utils import fobs
@@ -52,7 +51,7 @@ from nvflare.private.fed.client.communicator import Communicator
 from nvflare.private.fed.client.fed_client import FederatedClient
 from nvflare.private.fed.task_scope import runner as runner_module
 from nvflare.private.fed.task_scope.artifacts import read_artifact, write_artifact
-from nvflare.private.fed.task_scope.config import PUBLICATION_ACK_PROP, TaskScopeTransferConfigurator
+from nvflare.private.fed.task_scope.config import TaskScopeTransferConfigurator
 from nvflare.private.fed.task_scope.protocol import (
     ATTEMPT_OPTION,
     COMPUTE,
@@ -69,7 +68,6 @@ from nvflare.private.fed.task_scope.protocol import (
     read_receipt,
 )
 from nvflare.private.fed.task_scope.runner import TaskScopedClientAppRunner, TaskScopedClientRunner
-from nvflare.private.json_configer import ConfigError
 
 
 def _task(name="train", task_id="task-1"):
@@ -361,7 +359,6 @@ def test_framework_selects_transfer_graph_before_application_configuration(phase
         app_root="app",
         args=args,
         kv_list=args.set,
-        include_publication_components=phase == PUSH,
     )
 
 
@@ -384,7 +381,7 @@ def test_compute_and_unphased_lifecycles_keep_normal_application_configuration(p
     factory.assert_called_once()
 
 
-def _transfer_configurator(tmp_path, config, include_publication_components):
+def _transfer_configurator(tmp_path, config):
     config_file = tmp_path / "config_fed_client.json"
     config_file.write_text(json.dumps(config))
     args = Namespace(
@@ -404,7 +401,6 @@ def _transfer_configurator(tmp_path, config, include_publication_components):
         config_file_name=str(config_file),
         args=args,
         app_root=str(tmp_path),
-        include_publication_components=include_publication_components,
     )
 
 
@@ -421,7 +417,6 @@ def test_pull_transfer_configuration_never_builds_application_graph(tmp_path):
             ],
             "components": [{"id": "learner", "path": "application.LearnerThatMustNotBeConstructed"}],
         },
-        include_publication_components=False,
     )
 
     configurator.configure()
@@ -429,49 +424,6 @@ def test_pull_transfer_configuration_never_builds_application_graph(tmp_path):
     assert configurator.runner_config.task_router.task_table == {}
     assert configurator.runner_config.components == {}
     assert configurator.runner_config.handlers == []
-
-
-class _PublicationHook(FLComponent):
-    supports_task_scope_publication = True
-
-    def __init__(self):
-        super().__init__()
-        self.observed = []
-
-    def handle_event(self, event_type, fl_ctx):
-        self.observed.append((event_type, fl_ctx.get_prop(PUBLICATION_ACK_PROP)))
-
-
-def test_push_builds_only_explicit_publication_components(tmp_path):
-    configurator = _transfer_configurator(
-        tmp_path,
-        {
-            "format_version": 2,
-            "executors": [
-                {
-                    "tasks": ["train"],
-                    "executor": {"path": "application.phase_unaware.TrainerThatMustNotBeConstructed"},
-                }
-            ],
-            "task_scope_publication": {
-                "components": [
-                    {
-                        "id": "publisher",
-                        "path": "tests.unit_test.private.fed.task_scope.runner_test._PublicationHook",
-                    }
-                ]
-            },
-        },
-        include_publication_components=True,
-    )
-
-    configurator.configure()
-
-    hook = configurator.runner_config.components["publisher"]
-    assert hook.supports_task_scope_publication is True
-    assert configurator.runner_config.task_router.task_table == {}
-    assert configurator.runner_config.components == {"publisher": hook}
-    assert configurator.runner_config.handlers == [hook]
 
 
 def test_transfer_builds_framework_log_streamer_but_not_other_application_components(tmp_path):
@@ -487,30 +439,14 @@ def test_transfer_builds_framework_log_streamer_but_not_other_application_compon
                 {"id": "learner", "path": "application.LearnerThatMustNotBeConstructed"},
             ],
         },
-        include_publication_components=False,
     )
-    log_streamer = _PublicationHook()
+    log_streamer = FLComponent()
     configurator.authorize_and_build_component = MagicMock(return_value=log_streamer)
 
     configurator.configure()
 
     configurator.authorize_and_build_component.assert_called_once()
     assert configurator.runner_config.components == {"auto_log_streamer": log_streamer}
-
-
-def test_publication_component_requires_explicit_capability(tmp_path):
-    configurator = _transfer_configurator(
-        tmp_path,
-        {
-            "format_version": 2,
-            "task_scope_publication": {"components": [{"id": "publisher", "path": "application.LegacySendHandler"}]},
-        },
-        include_publication_components=True,
-    )
-    configurator.authorize_and_build_component = MagicMock(return_value=FLComponent())
-
-    with pytest.raises(ConfigError, match="supports_task_scope_publication=True"):
-        configurator.configure()
 
 
 def test_transfer_privacy_policy_does_not_construct_filter_graph():
@@ -886,8 +822,6 @@ def test_push_only_submits_persisted_payload_and_requires_ack(runner, phased, ac
     order = []
 
     def fire_event(event, context):
-        if event == EventType.AFTER_SEND_TASK_RESULT:
-            assert context.get_prop(PUBLICATION_ACK_PROP) is ack
         order.append(event)
 
     def submit(data, task_id, context):
@@ -921,46 +855,6 @@ def test_push_only_submits_persisted_payload_and_requires_ack(runner, phased, ac
         EventType.BEFORE_SEND_TASK_RESULT,
         "ack" if ack else "send_failed",
         EventType.AFTER_SEND_TASK_RESULT,
-    ]
-
-
-@pytest.mark.parametrize("ack", [False, True])
-def test_configured_publication_hook_observes_real_send_outcome(runner, phased, tmp_path, ack):
-    configurator = _transfer_configurator(
-        tmp_path,
-        {
-            "format_version": 2,
-            "task_scope_publication": {
-                "components": [
-                    {
-                        "id": "publisher",
-                        "path": "tests.unit_test.private.fed.task_scope.runner_test._PublicationHook",
-                    }
-                ]
-            },
-        },
-        include_publication_components=True,
-    )
-    configurator.configure()
-    hook = configurator.runner_config.components["publisher"]
-    runner.fire_event.side_effect = lambda event, ctx: fire_event_to_components(
-        event, configurator.runner_config.handlers, ctx
-    )
-    runner._send_task_result.return_value = ack
-
-    directory, attempt, phase_args = phased
-    result = Shareable({"weight": 7})
-    write_artifact(str(directory), attempt, runner.job_id, "result", "train", "task-1", result, task_ssid="session-1")
-
-    if ack:
-        runner.run("app", phase_args(PUSH))
-    else:
-        with pytest.raises(RuntimeError, match="client execution failed"):
-            runner.run("app", phase_args(PUSH))
-
-    assert hook.observed == [
-        (EventType.BEFORE_SEND_TASK_RESULT, None),
-        (EventType.AFTER_SEND_TASK_RESULT, ack),
     ]
 
 

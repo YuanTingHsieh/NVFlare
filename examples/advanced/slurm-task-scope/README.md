@@ -17,11 +17,10 @@ CP: availability probe → supervise each phase → wait for next task
 CP handles readiness and physical allocation supervision. Task payloads and Cell
 communication remain in CJs, but framework bootstrap selects the component graph
 before constructing it. Pull builds only the transfer runtime. Compute builds the
-application graph containing Executors, Learners and filters. Push builds the
-transfer runtime plus explicitly registered publication components. Each phase
-still has its own process and Slurm allocation. This retains D's application/runtime
-trust boundary; it does not isolate compute application code from Cell credentials
-as proposed in A/B.
+application graph containing Executors, Learners and filters. Push builds only the
+framework transfer runtime. Each phase still has its own process and Slurm
+allocation. This retains D's application/runtime trust boundary; it does not
+isolate compute application code from Cell credentials as proposed in A/B.
 
 All phases use the existing `nvflare.private.fed.app.client.worker_process`
 entrypoint. Its `--set` options select the phase runner and receipt policy;
@@ -76,34 +75,10 @@ configured Executor or its Learner dependencies. Compute uses the ordinary clien
 configuration and filtering pipeline. The framework-injected `JobLogStreamer` is
 retained in transfer processes so their logs follow the existing streaming path.
 
-An application component that must observe publication can be registered explicitly
-in `config_fed_client.json`:
-
-```json
-{
-  "task_scope_publication": {
-    "components": [
-      {
-        "id": "publication_audit",
-        "path": "custom.PublicationAudit",
-        "args": {}
-      }
-    ]
-  }
-}
-```
-
-The component must be an `FLComponent` and declare
-`supports_task_scope_publication = True`. It and nested dependencies are constructed
-only in push, receive START_RUN/END_RUN there, and observe the real
-BEFORE_SEND_TASK_RESULT, network submission/ACK and AFTER_SEND_TASK_RESULT ordering.
-At AFTER_SEND_TASK_RESULT, the private FLContext property
-`__task_scope_publication_ack` records whether the server acknowledged submission.
-Publication components must be CPU-safe and recover all required state from the
-persisted result or other durable storage. Merely listening for send events in the
-ordinary compute component graph does not migrate a legacy handler. A handler that
-requires both transient trainer memory and the later ACK must be split or given an
-explicit durable state handoff; otherwise the configuration is unsupported.
+Application components are not constructed in pull or push. Consequently,
+application handlers that must observe network submission or its ACK are not
+supported by this first prototype. The framework still requires the ACK before it
+records `TASK_COMPLETE`; no application hook is exposed for that transition.
 
 Pull/push use the job's CPU/memory
 request with no GPU GRES and empty CUDA/ROCm device visibility. Compute uses the
@@ -238,10 +213,11 @@ retried or deleted after ACK in this prototype.
 Every Executor must declare `supports_task_scoped_process = True`; this is an
 author assertion, not a proof. Cross-task state belongs in the task or durable
 workspace. Data/result filters and execution events run in compute.
-BEFORE_SEND/AFTER_SEND run in push with the explicitly registered publication
-graph. No in-memory FLContext or component state is carried between compute and
-publication. Pull and compute retain process cleanup but defer workspace upload
-to push. Per-process logs/events are not a new final-log completeness protocol.
+BEFORE_SEND/AFTER_SEND run in push with only the framework transfer graph, so
+ordinary application handlers do not observe them. No in-memory FLContext or
+component state is carried between compute and publication. Pull and compute
+retain process cleanup but defer workspace upload to push. Per-process logs/events
+are not a new final-log completeness protocol.
 
 `ClientAPIExecutor` supports task-scoped compute in `in_process` mode and in
 `external_process` mode with `launch_once=False`. The latter launches and tears
@@ -323,7 +299,7 @@ resident execution mode.
 | CP restart and attempt adoption | Deliberately rejected | Persist phase ownership, scheduler IDs, receipts, and terminal decisions; reconcile before launching or publishing anything new |
 | Attempt retry | Existing result submission retries transient network failure, but neither normal mode nor this branch provides a general whole-training-task retry contract | Add attempt IDs, idempotent result commit, server deduplication, lease expiry, and a policy distinguishing retryable infrastructure loss from application failure |
 | Relay and custom task managers | The readiness probe accepts only exact built-in broadcast/send managers | Replace manager type checks with a non-mutating scheduler `peek`/admission API and qualify relay ordering |
-| Full lifecycle-component compatibility | Only the compute graph and explicitly opted-in publication graph run | Audit and map every client-side lifecycle handler to job, task, or publication scope |
+| Full lifecycle-component compatibility | The application graph runs only in compute; transfer CJs are framework-only | Audit and map every client-side lifecycle handler to job, task, or publication scope |
 
 Current opt-in is intentionally exact:
 
@@ -358,8 +334,8 @@ listed component breaks. Stateless handlers may simply run per compute
 incarnation. Components that finalize one logical job, retain transient state,
 own a live channel, or must observe the later submission ACK need relocation,
 splitting, or a durable handoff. CPU transfer CJs initialize only framework
-transport/logging components and explicitly registered publication components;
-the ordinary application graph remains confined to compute.
+transport/logging components; the ordinary application graph remains confined to
+compute.
 
 Tests under `tests/unit_test/private/fed/task_scope/` and
 `tests/unit_test/app_opt/job_launcher/` check handoffs, phase ordering, rejection,
