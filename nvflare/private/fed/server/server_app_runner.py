@@ -22,13 +22,23 @@ from nvflare.private.fed.runner import Runner
 from nvflare.private.fed.server.server_engine import ServerEngine
 from nvflare.private.fed.server.server_json_config import ServerJsonConfigurator
 from nvflare.private.fed.server.server_status import ServerStatus
+from nvflare.private.fed.task_scope.server import TaskScopedServer
 from nvflare.private.fed.utils.fed_utils import authorize_build_component
 from nvflare.private.privacy_manager import PrivacyService
 from nvflare.security.logging import secure_format_exception
 
+TASK_SCOPED_SERVER_COMPONENT_ID = "_Task_Scoped_Server"
+
 
 def _set_up_run_config(workspace: Workspace, server, conf):
     runner_config = conf.runner_config
+
+    # Task-scoped CPs must be able to discover work before a CJ exists. Keep
+    # this framework endpoint available in every SJ; it remains dormant unless
+    # an authenticated task-scoped CP sends a probe. Preserve jobs that added
+    # the prototype component explicitly before it became built in.
+    if not any(isinstance(component, TaskScopedServer) for component in runner_config.components.values()):
+        runner_config.add_component(TASK_SCOPED_SERVER_COMPONENT_ID, TaskScopedServer())
 
     # configure privacy control!
     privacy_manager = create_privacy_manager(workspace, names_only=False, is_server=True)

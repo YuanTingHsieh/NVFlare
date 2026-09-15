@@ -17,8 +17,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from nvflare.apis.shareable import Shareable
+from nvflare.private.fed.server.server_app_runner import TASK_SCOPED_SERVER_COMPONENT_ID, _set_up_run_config
 from nvflare.private.fed.server.server_engine import ServerEngine
-from nvflare.private.fed.server.server_runner import ServerRunner
+from nvflare.private.fed.server.server_runner import ServerRunner, ServerRunnerConfig
+from nvflare.private.fed.task_scope.server import TaskScopedServer
 
 
 def _make_engine():
@@ -57,6 +59,45 @@ class TestServerEngineGetCell:
         engine.run_manager = None
 
         assert engine.get_cell() is None
+
+
+def _set_up_server_config(components=None, handlers=None):
+    handlers = handlers or []
+    runner_config = ServerRunnerConfig(
+        heartbeat_timeout=10,
+        task_request_interval=0.1,
+        workflows=[],
+        task_data_filters={},
+        task_result_filters={},
+        handlers=handlers,
+        components=components or {},
+    )
+    conf = SimpleNamespace(runner_config=runner_config, heartbeat_timeout=10, handlers=handlers)
+    server = SimpleNamespace()
+    privacy_manager = MagicMock()
+    privacy_manager.is_policy_defined.return_value = False
+    with (
+        patch("nvflare.private.fed.server.server_app_runner.create_privacy_manager", return_value=privacy_manager),
+        patch("nvflare.private.fed.server.server_app_runner.PrivacyService.initialize"),
+    ):
+        _set_up_run_config(MagicMock(), server, conf)
+    return runner_config
+
+
+def test_server_runtime_adds_builtin_task_scope_endpoint():
+    runner_config = _set_up_server_config()
+
+    task_scope_server = runner_config.components[TASK_SCOPED_SERVER_COMPONENT_ID]
+    assert isinstance(task_scope_server, TaskScopedServer)
+    assert task_scope_server in runner_config.handlers
+
+
+def test_server_runtime_preserves_explicit_task_scope_endpoint_without_duplicate():
+    configured = TaskScopedServer(terminal_timeout=9)
+    runner_config = _set_up_server_config({"configured_task_scope": configured}, [configured])
+
+    assert runner_config.components == {"configured_task_scope": configured}
+    assert runner_config.handlers == [configured]
 
 
 def _make_server_runner_for_submission(status="started"):

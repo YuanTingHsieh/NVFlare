@@ -17,7 +17,6 @@ import argparse
 from components import CheckpointCounterExecutor, GapController
 
 from nvflare.job_config.api import FedJob
-from nvflare.private.fed.task_scope.server import TaskScopedServer
 
 
 def main():
@@ -32,7 +31,6 @@ def main():
     if args.rounds < 1 or args.gap_seconds < 0 or args.gpus < 0:
         parser.error("rounds must be positive; gap-seconds and gpus must be nonnegative")
     job = FedJob(name="slurm-task-scope", min_clients=len(args.clients), mandatory_clients=args.clients)
-    job.to_server(TaskScopedServer(), id="task_scope")
     job.to_server(GapController(rounds=args.rounds, gap_seconds=args.gap_seconds))
     for site in args.clients:
         job.to(CheckpointCounterExecutor(crash_round=args.crash_round), site, tasks=["count"])

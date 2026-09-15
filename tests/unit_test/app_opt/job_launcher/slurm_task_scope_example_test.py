@@ -138,7 +138,9 @@ def test_export_preserves_nondefault_parameters_and_bundles_components(tmp_path)
     job = tmp_path / "slurm-task-scope"
     server = json.loads((job / "app_server/config/config_fed_server.json").read_text())
     assert server["workflows"][0]["args"] == {"rounds": 4, "gap_seconds": 20.0}
-    assert any(c["path"] == "nvflare.private.fed.task_scope.server.TaskScopedServer" for c in server["components"])
+    assert not any(
+        c["path"] == "nvflare.private.fed.task_scope.server.TaskScopedServer" for c in server.get("components", [])
+    )
     for site in ("site-1", "site-2"):
         app = job / f"app_{site}"
         assert (app / "custom/components.py").is_file()

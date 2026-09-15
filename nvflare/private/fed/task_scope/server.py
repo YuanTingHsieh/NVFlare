@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Opt-in server probe for the experimental one-task client lifecycle."""
+"""Built-in server probe for the experimental one-task client lifecycle."""
 
 import threading
 import time
@@ -87,9 +87,10 @@ def _available_task(communicator, client, fl_ctx):
 class TaskScopedServer(FLComponent):
     """Advertise pending broadcast/send work to CPs without allocating a CJ.
 
-    Add this component to the server job configuration only when the experimental
-    task-scoped client launcher is used. Availability is a hint: task timeout or
-    another recipient can invalidate it while the launcher queues a submission.
+    The server runtime installs this component for every job. It remains dormant
+    unless an authenticated task-scoped client parent probes it. Availability is
+    a hint: task timeout or another recipient can invalidate it while the launcher
+    queues a submission.
     """
 
     def __init__(self, terminal_timeout: float = 5.0):

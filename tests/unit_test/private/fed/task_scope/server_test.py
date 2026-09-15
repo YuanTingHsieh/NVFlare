@@ -199,6 +199,12 @@ def test_registration_uses_specific_cell_handler_for_authenticated_identity_bind
     )
 
 
+def test_unprobed_builtin_endpoint_sends_no_terminal_traffic():
+    server, engine, fl_ctx, _ = _server()
+    server.handle_event(EventType.END_RUN, fl_ctx)
+    engine.run_manager.aux_runner.send_aux_request.assert_not_called()
+
+
 @pytest.mark.parametrize("token", [None, "unknown"])
 def test_unknown_authentication_token_cannot_probe(token):
     server, _, _, _ = _server()

@@ -126,8 +126,9 @@ The earlier whole-CJ-per-task baseline is no longer selectable. Remove the old
 `task_scoped` launcher argument from prototype configurations; it is not accepted.
 These are site-level startup settings, not per-job or live toggles. Finish active
 jobs before changing the configuration and restarting CP; parent restart/adoption
-is unsupported. Enabling phased D still requires the server component, shared
-workspace and compatible executors described below.
+is unsupported. The SJ task-availability endpoint is built into the framework;
+enabling phased D still requires the shared workspace and compatible executors
+described below.
 
 ## Export and submit the example
 
@@ -136,11 +137,12 @@ python job.py --output /absolute/test-job-exports --clients site-1 site-2 --roun
 ```
 
 Submit the exported `slurm-task-scope` directory through the normal admin job
-workflow. The server app includes
-`nvflare.private.fed.task_scope.server.TaskScopedServer`. Its authenticated CP
-probe advertises ordinary broadcast/send work without assigning or pulling the
-payload. Only the pull CJ makes the normal task request. A stale readiness hint
-can yield TRY_AGAIN, in which case no compute/push allocation is submitted.
+workflow. Every SJ automatically installs the framework-owned task-scope server
+endpoint; the job does not configure it as an application component. Its
+authenticated CP probe advertises ordinary broadcast/send work without assigning
+or pulling the payload. Only the pull CJ makes the normal task request. A stale
+readiness hint can yield TRY_AGAIN, in which case no compute/push allocation is
+submitted.
 
 The example counter restores explicitly checkpointed state in each compute CJ,
 returns values 1, 2, 3, and records its PID/Slurm ID. The server waits for all
