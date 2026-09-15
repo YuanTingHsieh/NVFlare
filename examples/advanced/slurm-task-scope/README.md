@@ -292,12 +292,74 @@ result manifest committed
 
 The shared lifecycle lives in `nvflare/private/fed/task_scope/`; the existing
 Slurm launcher supplies physical handles and GPU-free transfer resource plans.
-No new scheduler implementation is introduced. Single-node allocations and
-eager, synchronous ordinary broadcast/send tasks are supported. Multi-node/DDP,
-unresolved lazy/pass-through results, Attach, CCWF/aux tasks and unchanged
-stateful legacy Executors are outside this prototype. CPU transfer CJs initialize
-only framework transport/logging components and explicitly registered publication
-components; the application graph is confined to compute.
+No new scheduler implementation is introduced. The following two tables separate
+semantic incompatibilities from work that is merely absent from this first branch.
+
+### Existing semantics that cannot be preserved unchanged
+
+These behaviors are not impossible for NVFlare to offer. They cannot, however,
+retain their current contract while also claiming that a worker is disposable at
+the task boundary. Each needs an explicit migration or a separately declared
+resident execution mode.
+
+| Existing behavior | Conflict with a disposable task worker | Possible explicit contract |
+|---|---|---|
+| Executor, Learner, or handler keeps required state only in Python objects between tasks | The object and process disappear after the task | Checkpoint declared state and reconstruct it, or select resident execution |
+| Attach, `external_process(launch_once=True)`, Flower/TIE, interactive XGBoost, split learning, or another live trainer/session remains addressable between tasks | There is no live task worker between assignments | Model the whole session as one resident task, redesign the protocol as tasks, or retain a resident compatibility mode |
+| A returned result still contains lazy/pass-through references served by the worker | The later consumer cannot reach the source after worker exit | Materialize and commit before exit, or move ownership to a durable object service |
+| Background work or a result callback completes after `Executor.execute()` returns | Process exit would cancel work that the current task result does not represent | Keep the task attempt alive until a final result commit, or expose an explicit asynchronous-attempt protocol |
+| `DO_TASK` arrives over the aux channel at an already-running CJ, possibly concurrently with its pulled task | No CJ exists during idle gaps, and an untracked aux RPC defeats the one-attempt boundary | Turn it into a scheduled task/lease, route it through a persistent site runtime, or use resident execution |
+| A `START_RUN`/`END_RUN` handler requires one object instance for the whole logical job or requires transient compute state when publication is acknowledged | Compute and push are separate incarnations and have different component graphs | Define job/task/publication event scopes and use an explicit durable handoff |
+
+### Can be supported, but is not implemented or fully qualified here
+
+| Capability | First-branch status | Work needed |
+|---|---|---|
+| Existing non-Client-API Executors | None currently opts in; this is an audit gap, not proof of incompatibility | Audit each family for task-local state, event semantics, engine/aux use, descendant cleanup, and durable outputs; add the declaration and tests where valid |
+| Server-side nonblocking `send`/`broadcast` | The Executor API is synchronous; there is no separate client-side "async task" mode. Nonblocking Controller scheduling has not been qualified | Verify readiness probing, callbacks, timeouts, and result ordering for ordinary `SendTaskManager`/`BcastTaskManager` tasks |
+| Very large results | Network submission can use the existing transport, but this branch first writes an eager, fully filtered FOBS artifact and may materialize it again in push | Add a disk-backed artifact/stream source and preserve the rule that required result filters finish before the committed artifact becomes publishable |
+| Multi-node Slurm and DDP | Rejected by an explicit prototype guard; single-node allocations may still reserve multiple GPUs | Define rank ownership, one authoritative commit, descendant/rank cleanup, allocation settlement, and multi-node tests |
+| Kubernetes and Docker task scope | Only Slurm is wired | Implement the same phase-handle and artifact contract using storage visible to all phase containers; shared POSIX paths must not be assumed |
+| CP restart and attempt adoption | Deliberately rejected | Persist phase ownership, scheduler IDs, receipts, and terminal decisions; reconcile before launching or publishing anything new |
+| Attempt retry | Existing result submission retries transient network failure, but neither normal mode nor this branch provides a general whole-training-task retry contract | Add attempt IDs, idempotent result commit, server deduplication, lease expiry, and a policy distinguishing retryable infrastructure loss from application failure |
+| Relay and custom task managers | The readiness probe accepts only exact built-in broadcast/send managers | Replace manager type checks with a non-mutating scheduler `peek`/admission API and qualify relay ordering |
+| Full lifecycle-component compatibility | Only the compute graph and explicitly opted-in publication graph run | Audit and map every client-side lifecycle handler to job, task, or publication scope |
+
+Current opt-in is intentionally exact:
+
+- `ClientAPIExecutor(in_process)` is enabled.
+- `ClientAPIExecutor(external_process, launch_once=False)` is enabled; its managed
+  trainer is created and stopped within the compute phase.
+- `ClientAPIExecutor(external_process, launch_once=True)` and `attach` are rejected
+  because they retain a trainer/session across tasks.
+- The example `CheckpointCounterExecutor` is enabled to demonstrate explicit
+  cross-task state restoration.
+- No built-in non-Client-API Executor currently declares
+  `supports_task_scoped_process=True`. The audit must cover at least the NP,
+  Learner/ModelLearner, SplitNN, Statistics, PSI, feature-election, scikit-learn,
+  TensorFlow validator, MultiProcess, TIE/Flower, IPC, CCWF, XGBoost, P2P,
+  Collab, and Edge executor families.
+
+`START_RUN`/`END_RUN` is therefore a broad compatibility surface, not just an
+Executor concern. Client-side components that need classification include:
+
+- execution/session owners: `ClientAPIExecutor`, Learner/ModelLearner/SplitNN,
+  MultiProcess, IPC, TIE/Flower, CCWF, XGBoost, P2P, Collab, and Edge components;
+- filters and security state: SVT privacy and HE encrypt/decrypt/serialize/shareable
+  components;
+- persistence and selection: model persistors/locators, in-time selectors, and
+  validation-result writers; and
+- telemetry and shutdown: `JobLogStreamer`, `MetricsArtifactWriter`,
+  `JobStatsReporter`, `EventRecorder`, `MetricRelay`, and tensor/object streaming
+  components.
+
+This list identifies code that must be audited; it does not assert that every
+listed component breaks. Stateless handlers may simply run per compute
+incarnation. Components that finalize one logical job, retain transient state,
+own a live channel, or must observe the later submission ACK need relocation,
+splitting, or a durable handoff. CPU transfer CJs initialize only framework
+transport/logging components and explicitly registered publication components;
+the ordinary application graph remains confined to compute.
 
 Tests under `tests/unit_test/private/fed/task_scope/` and
 `tests/unit_test/app_opt/job_launcher/` check handoffs, phase ordering, rejection,

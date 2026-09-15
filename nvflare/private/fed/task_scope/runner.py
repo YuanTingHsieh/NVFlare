@@ -57,9 +57,10 @@ class TaskScopedClientRunner(ClientRunner):
     never sends its task result to the server. Send events run in the CPU push
     process and observe the real result-submission ACK.
 
-    Aux tasks, asynchronous execution, lazy results, and components that rely on
-    continuing process-local state are unsupported. A successful outcome records
-    the existing result-submission ACK, not an additional durable server commit.
+    Aux DO_TASK RPCs, work that outlives execute(), unresolved lazy results, and
+    components that rely on continuing process-local state are unsupported. A
+    successful outcome records the existing result-submission ACK, not an
+    additional durable server commit.
     """
 
     def run(self, app_root, args):
