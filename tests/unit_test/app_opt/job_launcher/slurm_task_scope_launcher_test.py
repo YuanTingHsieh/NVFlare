@@ -361,6 +361,92 @@ def test_terminal_notice_during_active_allocation_still_requires_exit_and_receip
     assert probe.call_count >= 1
 
 
+def _start_blocked_push(
+    tmp_path,
+    push_rc=JobReturnCode.SUCCESS,
+    communication_timeout=0.05,
+    transfer_timeout=0.5,
+):
+    push_spec = {
+        "block": True,
+        "receipt": {STATUS: TASK_COMPLETE, "task_id": "t"},
+        "rc": push_rc,
+    }
+    handle, manager, probe = _handle(
+        tmp_path,
+        [READY],
+        [
+            {"receipt": {STATUS: INPUT_READY, "task_id": "t"}},
+            {"receipt": {STATUS: RESULT_READY, "task_id": "t"}},
+            push_spec,
+        ],
+    )
+    handle.poll_interval = 0.01
+    handle.communication_timeout = communication_timeout
+    handle.transfer_timeout = transfer_timeout
+    push_launched = threading.Event()
+
+    def on_launch(allocation):
+        if allocation.plan.study_env[PHASE_OPTION] == PUSH:
+            push_launched.set()
+
+    manager.on_launch = on_launch
+    thread = _start(handle)
+    assert push_launched.wait(1)
+    allocation = manager.allocations[2]
+    assert allocation.entered_wait.wait(1)
+    return handle, probe, thread, allocation
+
+
+@pytest.mark.parametrize("probe_reply", [_reply(READY), None], ids=["endpoint_alive", "endpoint_gone"])
+def test_done_does_not_cancel_running_push_before_settlement_and_receipt(tmp_path, probe_reply):
+    handle, probe, thread, allocation = _start_blocked_push(tmp_path)
+    probe.side_effect = None
+    probe.return_value = probe_reply
+    handle.notify_terminal(DONE)
+
+    # The old behavior cancelled here after communication_timeout, either
+    # because DONE remained visible or because its endpoint stopped replying.
+    assert not allocation.release.wait(0.15)
+    assert thread.is_alive()
+    assert allocation.terminations == 0
+
+    allocation.release.set()
+    _join(thread)
+    assert handle.poll() == JobReturnCode.SUCCESS
+    assert allocation.finished
+    assert allocation.terminations == 0
+    push_receipts = [
+        event for event in _events(handle) if event["phase"] == "receipt" and event.get("task_phase") == PUSH
+    ]
+    assert len(push_receipts) == 1
+    assert push_receipts[0]["receipt"][STATUS] == TASK_COMPLETE
+
+
+def test_done_does_not_disable_running_push_transfer_timeout(tmp_path):
+    handle, probe, thread, allocation = _start_blocked_push(
+        tmp_path,
+        communication_timeout=0.03,
+        transfer_timeout=0.12,
+    )
+    probe.side_effect = None
+    probe.return_value = None
+    handle.notify_terminal(DONE)
+
+    assert allocation.release.wait(1), "stuck push did not retain its transfer deadline"
+    _join(thread)
+    assert handle.poll() == ProcessExitCode.INFRASTRUCTURE_ERROR
+    assert allocation.terminations >= 1
+
+
+def test_done_cannot_hide_running_push_nonzero_exit(tmp_path):
+    handle, _, thread, allocation = _start_blocked_push(tmp_path, push_rc=7)
+    handle.notify_terminal(DONE)
+    allocation.release.set()
+    _join(thread)
+    assert handle.poll() == ProcessExitCode.EXCEPTION
+
+
 @pytest.mark.parametrize("phase", [PULL, COMPUTE])
 def test_terminal_notice_before_push_does_not_claim_result_publication(tmp_path, phase):
     specs = [{} for _ in PHASES[: PHASES.index(phase)]] + [{"block": True}]

@@ -237,9 +237,16 @@ class TaskScopedJobHandle(JobHandleSpec):
                     cancel(ProcessExitCode.INFRASTRUCTURE_ERROR, f"{phase} phase exceeded its transfer timeout")
                     continue
 
-            push_reconciling = phase == PUSH and transfer_finished
             with self._lock:
                 terminal = self._server_terminal
+            # Once a push is running, DONE can legitimately make the server's
+            # job endpoint disappear before launcher accounting settles. Keep
+            # ownership until wait() returns and the caller validates the
+            # physical RC and matching receipt. The transfer deadline above
+            # still bounds a push whose execution has not finished.
+            push_reconciling = phase == PUSH and (
+                transfer_finished or (terminal == DONE and transfer_started is not None)
+            )
             if terminal == ERROR:
                 cancel(ProcessExitCode.EXCEPTION, "server reported a terminal error during the active phase")
                 continue
