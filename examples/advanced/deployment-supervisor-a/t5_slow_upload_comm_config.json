@@ -1,0 +1,8 @@
+{
+  "streaming_chunk_size": 4096,
+  "streaming_window_size": 1,
+  "streaming_ack_interval": 1,
+  "streaming_send_timeout": 600.0,
+  "streaming_ack_progress_timeout": 120.0,
+  "streaming_ack_progress_check_interval": 1.0
+}

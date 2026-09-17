@@ -63,6 +63,7 @@ from nvflare.fuel.f3.drivers.file_driver import SCHEME as SHARED_FILE_SCHEME
 from nvflare.fuel.f3.drivers.file_driver import parse_file_url
 from nvflare.fuel.utils.config_service import ConfigService
 from nvflare.fuel.utils.secret_utils import has_secret_refs
+from nvflare.private.fed.deployment_supervisor.federation import DeploymentSupervisorLauncherMixin
 from nvflare.utils.job_launcher_utils import (
     get_client_job_args,
     get_credential_env,
@@ -546,7 +547,7 @@ class SlurmJobLauncher(JobLauncherSpec):
             self.manager.shutdown()
 
 
-class ClientSlurmJobLauncher(SlurmJobLauncher):
+class ClientSlurmJobLauncher(DeploymentSupervisorLauncherMixin, SlurmJobLauncher):
     EXE_MODULE = "nvflare.private.fed.app.client.worker_process"
     SUPPORTS_ADDITIONAL_NODE_COMMAND = True
     SUPPORTS_CLIENT_API_ATTACH = True

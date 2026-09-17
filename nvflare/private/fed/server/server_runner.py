@@ -29,6 +29,7 @@ from nvflare.apis.utils.task_utils import apply_filters
 from nvflare.fuel.f3.streaming.download_service import DownloadService
 from nvflare.fuel.utils.job_utils import build_client_hierarchy
 from nvflare.private.defs import SpecialTaskName, TaskConstant
+from nvflare.private.fed.deployment_supervisor.federation import DeploymentTaskService
 from nvflare.private.fed.tbi import TBI
 from nvflare.private.privacy_manager import Scope
 from nvflare.security.logging import secure_format_exception
@@ -110,6 +111,10 @@ class ServerRunner(TBI):
         self._processing_tasks = {}  # client_name => task_id
         self._processing_tasks_lock = threading.Lock()  # protect _processing_tasks from race conditions
         self._register_aux_message_handler(engine)
+        # The deployment-owned service binds after the job Cell/run manager
+        # exists and before the workflow can schedule its first task.
+        self.deployment_task_service = DeploymentTaskService()
+        self.deployment_task_service.start(engine, job_id)
 
     def _register_aux_message_handler(self, engine):
         engine.register_aux_message_handler(

@@ -1,0 +1,12 @@
+{
+  "routes": {
+    "train": {
+      "kind": "executor",
+      "entrypoint": "components:IncrementExecutor"
+    },
+    "validate": {
+      "kind": "executor",
+      "entrypoint": "components:IncrementExecutor"
+    }
+  }
+}

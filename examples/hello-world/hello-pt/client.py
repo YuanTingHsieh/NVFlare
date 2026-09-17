@@ -17,6 +17,7 @@ client side training scripts
 """
 
 import argparse
+import os
 
 import torch
 import torchvision
@@ -30,6 +31,22 @@ import nvflare.client as flare
 from nvflare.client.tracking import SummaryWriter
 
 DATASET_PATH = "/tmp/nvflare/data"
+
+
+def _managed_state_path():
+    state_dir = os.environ.get("NVFLARE_TASK_STATE_DIR")
+    return os.path.join(state_dir, "cifar_net.pth") if state_dir else None
+
+
+def _save_local_model(params):
+    state_path = _managed_state_path()
+    if not state_path:
+        torch.save(params, "./cifar_net.pth")
+        return
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    temporary_path = f"{state_path}.tmp.{os.getpid()}"
+    torch.save(params, temporary_path)
+    os.replace(temporary_path, state_path)
 
 
 def evaluate(net, data_loader, device):
@@ -99,7 +116,12 @@ def main():
     flare.init()
     sys_info = flare.system_info()
     client_name = sys_info["site_name"]
-    last_params = None
+    state_path = _managed_state_path()
+    last_params = (
+        torch.load(state_path, map_location="cpu", weights_only=True)
+        if state_path and os.path.isfile(state_path)
+        else None
+    )
 
     # (optional) metrics tracking
     summary_writer = SummaryWriter()
@@ -162,9 +184,8 @@ def main():
 
         print(f"Finished Training for {client_name}")
 
-        PATH = "./cifar_net.pth"
         last_params = {name: param.detach().cpu().clone() for name, param in model.state_dict().items()}
-        torch.save(last_params, PATH)
+        _save_local_model(last_params)
 
         # (7) construct trained FL model
         output_model = flare.FLModel(
