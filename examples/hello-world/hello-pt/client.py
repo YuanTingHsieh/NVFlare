@@ -17,6 +17,8 @@ client side training scripts
 """
 
 import argparse
+import hashlib
+import os
 
 import torch
 import torchvision
@@ -30,6 +32,22 @@ import nvflare.client as flare
 from nvflare.client.tracking import SummaryWriter
 
 DATASET_PATH = "/tmp/nvflare/data"
+
+
+def _task_worker_state_path():
+    state_dir = os.environ.get("NVFLARE_TASK_STATE_DIR")
+    return os.path.join(state_dir, "cifar_net.pth") if state_dir else None
+
+
+def _save_local_model(params):
+    state_path = _task_worker_state_path()
+    if not state_path:
+        torch.save(params, "./cifar_net.pth")
+        return
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    temporary_path = f"{state_path}.tmp.{os.getpid()}"
+    torch.save(params, temporary_path)
+    os.replace(temporary_path, state_path)
 
 
 def evaluate(net, data_loader, device):
@@ -58,8 +76,10 @@ def main():
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--synthetic_data", action="store_true")
+    parser.add_argument("--data_root", type=str, default=DATASET_PATH)
     parser.add_argument("--train_size", type=int, default=50000)
     parser.add_argument("--test_size", type=int, default=10000)
+    parser.add_argument("--transport_payload_mib", type=int, default=0)
     args = parser.parse_args()
     batch_size = args.batch_size
     epochs = args.epochs
@@ -85,8 +105,8 @@ def main():
             size=args.test_size, image_size=(3, 32, 32), num_classes=10, transform=transform
         )
     else:
-        train_set = torchvision.datasets.CIFAR10(root=DATASET_PATH, train=True, download=True, transform=transform)
-        test_set = torchvision.datasets.CIFAR10(root=DATASET_PATH, train=False, download=True, transform=transform)
+        train_set = torchvision.datasets.CIFAR10(root=args.data_root, train=True, download=True, transform=transform)
+        test_set = torchvision.datasets.CIFAR10(root=args.data_root, train=False, download=True, transform=transform)
 
     train_loader = torch.utils.data.DataLoader(
         train_set, batch_size=batch_size, shuffle=True, num_workers=args.num_workers
@@ -99,7 +119,12 @@ def main():
     flare.init()
     sys_info = flare.system_info()
     client_name = sys_info["site_name"]
-    last_params = None
+    state_path = _task_worker_state_path()
+    last_params = (
+        torch.load(state_path, map_location="cpu", weights_only=True)
+        if state_path and os.path.isfile(state_path)
+        else None
+    )
 
     # (optional) metrics tracking
     summary_writer = SummaryWriter()
@@ -162,15 +187,28 @@ def main():
 
         print(f"Finished Training for {client_name}")
 
-        PATH = "./cifar_net.pth"
         last_params = {name: param.detach().cpu().clone() for name, param in model.state_dict().items()}
-        torch.save(last_params, PATH)
+        _save_local_model(last_params)
 
         # (7) construct trained FL model
+        output_meta = {"NUM_STEPS_CURRENT_ROUND": steps}
+        if args.transport_payload_mib:
+            if args.transport_payload_mib < 0:
+                raise ValueError("transport_payload_mib must not be negative")
+            payload_size = args.transport_payload_mib * 1024 * 1024
+            pattern = b"NVFLARE-G05-SLOW-UPLOAD\x00"
+            payload = (pattern * ((payload_size + len(pattern) - 1) // len(pattern)))[:payload_size]
+            output_meta.update(
+                {
+                    "architecture_b_g05_payload": payload,
+                    "architecture_b_g05_payload_bytes": payload_size,
+                    "architecture_b_g05_payload_sha256": hashlib.sha256(payload).hexdigest(),
+                }
+            )
         output_model = flare.FLModel(
             params=last_params,
             metrics={"accuracy": accuracy},
-            meta={"NUM_STEPS_CURRENT_ROUND": steps},
+            meta=output_meta,
         )
         print(f"site: {client_name}, sending model to server.")
         # (8) send model back to NVFlare

@@ -33,6 +33,7 @@ from nvflare.fuel.f3.streaming.download_service import DownloadService
 from nvflare.fuel.utils.msg_root_utils import delete_msg_root
 from nvflare.private.defs import SpecialTaskName, TaskConstant
 from nvflare.private.fed.client.client_engine_executor_spec import ClientEngineExecutorSpec, TaskAssignment
+from nvflare.private.fed.job_task_worker.protocol import PUBLICATION_ACK_PROP
 from nvflare.private.fed.tbi import TBI
 from nvflare.private.json_configer import ConfigError
 from nvflare.private.privacy_manager import Scope
@@ -581,7 +582,8 @@ class ClientRunner(TBI):
         self.log_debug(fl_ctx, "firing event EventType.BEFORE_SEND_TASK_RESULT")
         self.fire_event(EventType.BEFORE_SEND_TASK_RESULT, fl_ctx)
 
-        self._send_task_result(task_reply, task.task_id, fl_ctx)
+        submitted = self._send_task_result(task_reply, task.task_id, fl_ctx)
+        fl_ctx.set_prop(PUBLICATION_ACK_PROP, submitted is True, private=True, sticky=False)
         self.log_debug(fl_ctx, "firing event EventType.AFTER_SEND_TASK_RESULT")
         self.fire_event(EventType.AFTER_SEND_TASK_RESULT, fl_ctx)
 
