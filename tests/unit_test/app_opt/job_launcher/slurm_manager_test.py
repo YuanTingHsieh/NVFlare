@@ -210,6 +210,33 @@ def test_initialize_resolves_runtime_path_once(tmp_path, monkeypatch):
     assert Path(manager.jobs_dir) == workspace / ".nvflare_slurm" / "jobs"
 
 
+def test_initialize_supports_isolated_control_namespace(tmp_path, monkeypatch):
+    workspace = _runtime_workspace(tmp_path)
+    commands = _make_slurm_commands(tmp_path / "runtime-bin")
+    monkeypatch.setenv("PATH", str(tmp_path / "runtime-bin"))
+    _bootstrap_adapter(monkeypatch)
+    manager = SlurmJobManager(
+        _runtime_config(workspace, {name: None for name in commands}),
+        logging.getLogger("nested-runtime"),
+        control_dir_name=".nvflare_task_worker_slurm",
+    )
+
+    manager.initialize()
+
+    assert Path(manager.jobs_dir) == workspace / ".nvflare_task_worker_slurm" / "jobs"
+    assert not (workspace / ".nvflare_slurm").exists()
+
+
+@pytest.mark.parametrize("control_dir_name", [None, "", ".", "..", "nested/jobs", "/absolute"])
+def test_rejects_invalid_control_namespace(tmp_path, control_dir_name):
+    with pytest.raises(ValueError, match="control_dir_name"):
+        SlurmJobManager(
+            _config(tmp_path),
+            logging.getLogger("invalid-control-namespace"),
+            control_dir_name=control_dir_name,
+        )
+
+
 @pytest.mark.parametrize("configured", [None, "not_executable"])
 def test_initialize_rejects_missing_or_non_executable_runtime_command(tmp_path, monkeypatch, configured):
     workspace = _runtime_workspace(tmp_path)

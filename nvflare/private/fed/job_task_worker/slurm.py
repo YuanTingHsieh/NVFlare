@@ -24,16 +24,21 @@ from nvflare.apis.utils.format_check import check_job_id
 from nvflare.apis.workspace import Workspace
 from nvflare.app_opt.job_launcher.slurm.config import LaunchPlan, SlurmLauncherError, _require_string
 from nvflare.app_opt.job_launcher.slurm.launcher import ClientSlurmJobLauncher, _resolve_resources, _validate_run_dir
+from nvflare.app_opt.job_launcher.slurm.manager import SlurmJobManager
 from nvflare.private.fed.job_task_worker.executor import validate_worker_environment
 from nvflare.private.fed.job_task_worker.protocol import WORKER_MODULE
+
+_TASK_WORKER_CONTROL_DIR = ".nvflare_task_worker_slurm"
 
 
 class SlurmTaskWorkerLauncher(ClientSlurmJobLauncher):
     """Run only the application worker in a one-node Slurm allocation.
 
     The normal NVFlare job metadata is deliberately not used to select or size
-    the CJ launcher: ``worker_resources`` sizes these nested task allocations,
-    while the CPU CJ must be launched by the ordinary local job launcher.
+    the CJ launcher: ``worker_resources`` sizes these nested task allocations.
+    Unlike a general Slurm job launcher, this task-worker-only launcher may own
+    a scheduler manager inside a Slurm-launched CPU CJ so the worker receives a
+    distinct allocation.
     """
 
     def __init__(
@@ -94,22 +99,20 @@ class SlurmTaskWorkerLauncher(ClientSlurmJobLauncher):
             pending_timeout=pending_timeout,
             multi_node_port_range=multi_node_port_range,
         )
+        if self.manager is None:
+            self.manager = SlurmJobManager(
+                config=self.config,
+                logger=self.logger,
+                control_dir_name=_TASK_WORKER_CONTROL_DIR,
+            )
 
     def handle_event(self, event_type: str, fl_ctx: FLContext):
         if event_type == EventType.START_RUN:
-            if self.manager is None:
-                raise SlurmLauncherError(
-                    "Architecture B requires the resident CPU CJ outside Slurm; nested launch is unavailable"
-                )
             self.manager.initialize()
-        elif event_type == EventType.END_RUN and self.manager is not None:
+        elif event_type == EventType.END_RUN:
             self.manager.shutdown()
 
     def _build_task_plan(self, attempt_dir, fl_ctx):
-        if self.manager is None:
-            raise SlurmLauncherError(
-                "Architecture B requires the resident CPU CJ outside Slurm; nested launch is unavailable"
-            )
         job_meta = fl_ctx.get_prop(FLContextKey.JOB_META)
         if not isinstance(job_meta, dict):
             raise SlurmLauncherError("task-worker launch requires job metadata in the resident CJ")

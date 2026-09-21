@@ -28,6 +28,8 @@ from nvflare.apis.job_launcher_spec import JobProcessEnv
 from nvflare.apis.shareable import ReservedHeaderKey, Shareable
 from nvflare.apis.signal import Signal
 from nvflare.apis.workspace import Workspace
+from nvflare.app_opt.job_launcher.slurm.config import SLURM_CHILD_PROCESS_ENV
+from nvflare.app_opt.job_launcher.slurm.manager import SlurmJobManager
 from nvflare.private.fed.client.client_engine_executor_spec import TaskAssignment
 from nvflare.private.fed.client.client_runner import ClientRunner, ClientRunnerConfig, TaskRouter
 from nvflare.private.fed.job_task_worker.artifacts import read_artifact, write_artifact
@@ -600,6 +602,29 @@ def test_slurm_plan_sizes_worker_not_resident_cj(tmp_path):
     assert plan.study_env["PYTHONHASHSEED"] == "202610"
     assert plan.study_secret_env == {}
     assert plan.additional_node_command == ()
+
+
+def test_slurm_task_worker_launcher_can_nest_from_scheduled_cj(monkeypatch, tmp_path):
+    workspace = _workspace(tmp_path)
+    os.chmod(workspace.get_root_dir(), 0o700)
+    monkeypatch.setenv(SLURM_CHILD_PROCESS_ENV, "1")
+    launcher = SlurmTaskWorkerLauncher(
+        workspace_path=workspace.get_root_dir(),
+        sandbox="none",
+        python_path="/usr/bin/python3",
+        executables={name: "/usr/bin/true" for name in ("sbatch", "squeue", "sacct", "scancel")},
+    )
+    calls = []
+    monkeypatch.setattr(launcher.manager, "initialize", lambda: calls.append("initialize"))
+    monkeypatch.setattr(launcher.manager, "shutdown", lambda: calls.append("shutdown"))
+
+    launcher.handle_event(EventType.START_RUN, _context(workspace, _Engine(workspace)))
+    launcher.handle_event(EventType.END_RUN, _context(workspace, _Engine(workspace)))
+
+    assert launcher._child_process is True
+    assert isinstance(launcher.manager, SlurmJobManager)
+    assert launcher.manager.control_dir_name == ".nvflare_task_worker_slurm"
+    assert calls == ["initialize", "shutdown"]
 
 
 def test_slurm_launcher_rejects_credential_environment(tmp_path):

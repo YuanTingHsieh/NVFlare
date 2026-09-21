@@ -33,15 +33,18 @@ the durable attempt after that CJ/site fails.
 | Federation Cell/session | Owns | None |
 | Task acquisition and task filters | Owns | Receives one already-filtered task |
 | Application code | Does not run it | Runs it |
-| Slurm/GPU allocation | Must remain outside it | Owns the one-node allocation |
+| Slurm allocation | May own a job-long CPU allocation | Owns a distinct one-node task allocation |
 | Cancellation | Requests and verifies settlement | Is terminated with its allocation/process group |
 | Result durability | Validates committed worker artifact | Writes payload, manifest, and receipt |
 | Result filters/publication/retry/ACK | Owns through the normal `ClientRunner` path | None |
 
 `JobTaskWorkerExecutor` is infrastructure, even though it implements the
 `Executor` interface needed by `ClientRunner`. It is not the user's application
-executor. `SlurmTaskWorkerLauncher` rejects nested use from a CJ that is itself a
-Slurm job, accepts only the task-worker module, and supports one node per task.
+executor. `SlurmTaskWorkerLauncher` accepts only the task-worker module and
+supports one node per task. It is the bounded exception to the general Slurm
+launcher's non-nesting rule: when the CPU CJ is itself Slurm-launched, the
+task-worker launcher creates a scheduler manager for the distinct nested task
+allocations.
 
 The worker environment removes `AUTH_TOKEN`, `TOKEN_SIGNATURE`, and `SSID`, and
 the task-local engine returns no Cell. Its FL context does not contain the
@@ -195,7 +198,9 @@ and interpreter, Slurm executable paths/directives, one-node worker resources,
 time/poll/pending limits, and task environment (`job.py:58-79,263-274`;
 `slurm.py:31-37,108-174`). They size and launch the disposable application
 worker. They do not create an external Client API backend, change
-`launch_once`, or move the resident CPU CJ into Slurm.
+`launch_once`, or decide the resident CPU CJ's placement. The site's ordinary
+job launcher controls whether that CJ runs locally or in its own Slurm
+allocation.
 
 `SUPPORTED` below means exercised by this bounded adapter, not that every
 configuration of the example is supported. `UNQUALIFIED` means dependencies or
@@ -561,10 +566,11 @@ These are observations from the recorded B runs, not general capacity claims:
 - the exact 64 MiB slow-upload row proved that the task allocation and GPU were
   gone during the later CPU-CJ publication window.
 
-Operationally, every active job needs a persistent CPU CJ outside Slurm, a
-shared durable workspace visible to the task allocation, correct owner-only
-workspace permissions, the Slurm command set/configuration, and cleanup of both
-the job-long CJ and short allocations (`slurm.py:31-37,98-145`). The campaign
+Operationally, every active job needs a persistent CPU CJ, either on the host
+or in a job-long Slurm allocation, plus a shared durable workspace visible to
+the task allocation, correct owner-only workspace permissions, the Slurm
+command set/configuration, and cleanup of both the job-long CJ and short
+allocations (`slurm.py:31-38,98-145`). The campaign
 also exposed a harness burden: one client parent needed a held SSH session and
 manual exact-PID cleanup. That incident is not a B product leak, but it shows
 that the standing-CJ topology makes service supervision part of deployment

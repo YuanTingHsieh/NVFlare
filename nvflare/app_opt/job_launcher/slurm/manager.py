@@ -118,11 +118,20 @@ class SlurmJobManager:
         logger: logging.Logger,
         adapter: Optional[_SlurmCliAdapter] = None,
         monotonic_clock: Callable[[], float] = time.monotonic,
+        control_dir_name: str = CONTROL_DIR,
     ):
+        if (
+            not isinstance(control_dir_name, str)
+            or not control_dir_name
+            or os.path.basename(control_dir_name) != control_dir_name
+            or control_dir_name in (".", "..")
+        ):
+            raise ValueError("control_dir_name must be one nonempty path component")
         self.config = config
         self.logger = logger
         self.adapter = adapter
         self._monotonic = monotonic_clock
+        self.control_dir_name = control_dir_name
         self.jobs_dir = None
         self._lock = threading.Lock()
         self._submission_gate = threading.Lock()
@@ -153,7 +162,7 @@ class SlurmJobManager:
             if self._initialized:
                 return
             workspace = self._validate_workspace()
-            control = os.path.join(workspace, CONTROL_DIR)
+            control = os.path.join(workspace, self.control_dir_name)
             jobs_dir = os.path.join(control, "jobs")
             for path in (control, jobs_dir):
                 _ensure_dir(path)

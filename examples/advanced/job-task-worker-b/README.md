@@ -43,9 +43,11 @@ CUDA, and its data-loader generator.
 Add `--publication-delay 5` only for supplementary CPU-filter-delay evidence;
 it does not qualify the common slow-network-upload row. A Slurm run also
 requires `--slurm` and a site workspace template such as
-`/shared/architecture-b/{site}`. The CPU CJ itself must use the normal local job
-launcher; `SlurmTaskWorkerLauncher` refuses to operate from a CJ that is already
-inside a Slurm allocation.
+`/shared/architecture-b/{site}`. The site may launch the CPU CJ locally or in a
+separate Slurm allocation. When the CJ is Slurm-scheduled,
+`SlurmTaskWorkerLauncher` intentionally creates its own scheduler manager so
+each application task still receives a distinct allocation. The shared
+workspace and Slurm command set must be reachable from that CJ allocation.
 
 Application state does not survive in memory between workers. The framework
 provides `NVFLARE_TASK_STATE_DIR` and `job_task_worker_state_dir`; applications
