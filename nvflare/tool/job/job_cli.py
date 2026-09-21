@@ -36,12 +36,7 @@ from nvflare.fuel.utils.config import ConfigFormat
 from nvflare.fuel.utils.config_factory import ConfigFactory
 from nvflare.tool.cli_arg_utils import get_arg_value
 from nvflare.tool.cli_session import add_startup_kit_selection_args, new_cli_session, new_cli_session_for_args
-from nvflare.tool.job.config.configer import (
-    build_config_file_indices,
-    filter_indices,
-    get_root_index,
-    merge_configs_from_cli,
-)
+from nvflare.tool.job.config.configer import build_config_file_indices, filter_indices, merge_configs_from_cli
 from nvflare.tool.job.job_client_const import (
     CONFIG_FED_CLIENT_CONF,
     CONFIG_FED_SERVER_CONF,
@@ -832,7 +827,7 @@ def define_create_job_parser(job_subparser):
 
 def prepare_job_config(cmd_args, app_names: List[str], tmp_job_dir: Optional[str] = None):
     merged_conf, config_modified = merge_configs_from_cli(cmd_args, app_names)
-    need_save_config = config_modified is True or tmp_job_dir is not None
+    need_save_config = config_modified is True
 
     if tmp_job_dir is None:
         tmp_job_dir = cmd_args.job_folder
@@ -854,15 +849,14 @@ def has_client_config_file(app_config_dir):
 
 def save_merged_configs(app_merged_conf, job_folder, tmp_job_dir):
     for app_name, merged_conf in app_merged_conf.items():
-        for file, (config, excluded_key_List, key_indices) in merged_conf.items():
+        for file, (config, _, _) in merged_conf.items():
             if job_folder == tmp_job_dir:
                 dst_path = file
             else:
                 rel_file_path = os.path.relpath(file, job_folder)
                 dst_path = os.path.join(tmp_job_dir, rel_file_path)
 
-            root_index = get_root_index(next(iter(key_indices.values()))[0])
-            save_config(root_index.value, dst_path)
+            save_config(config, dst_path)
 
 
 def prepare_meta_config(cmd_args, target_template_dir, app_names):

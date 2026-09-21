@@ -14,6 +14,7 @@
 
 import argparse
 import json
+import shutil
 import sys
 
 import pytest
@@ -200,3 +201,46 @@ class TestJobCLI:
 
         with pytest.raises(SystemExit):
             parser.parse_args(["job", "submit", "--submit-token", token])
+
+    def test_prepare_job_config_preserves_multi_app_meta(self, tmp_path):
+        job_dir = tmp_path / "job"
+        temp_job_dir = tmp_path / "temp_job"
+        meta = {
+            "name": "multi-app-job",
+            "deploy_map": {
+                "app_server": ["server"],
+                "app_site-1": ["site-1"],
+                "app_site-2": ["site-2"],
+            },
+            "resource_spec": {"@default": {"num_of_cpus": 1, "memory": "2Gi", "num_of_gpus": 0}},
+            "min_clients": 2,
+            "mandatory_clients": ["site-1", "site-2"],
+            "launcher_spec": {"path": "example.Launcher"},
+        }
+        job_dir.mkdir()
+        (job_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        for app_name in ("app_server", "app_site-1", "app_site-2"):
+            config_dir = job_dir / app_name / "config"
+            config_dir.mkdir(parents=True)
+            config_name = "config_fed_server.json" if app_name == "app_server" else "config_fed_client.json"
+            (config_dir / config_name).write_text("{}", encoding="utf-8")
+        shutil.copytree(job_dir, temp_job_dir)
+        args = argparse.Namespace(job_folder=str(job_dir), config_file=None, script=None)
+
+        job_cli.prepare_job_config(args, ["app_server", "app_site-1", "app_site-2"], str(temp_job_dir))
+
+        assert json.loads((temp_job_dir / "meta.json").read_text(encoding="utf-8")) == meta
+
+    def test_prepare_job_config_preserves_empty_meta(self, tmp_path):
+        job_dir = tmp_path / "job"
+        temp_job_dir = tmp_path / "temp_job"
+        config_dir = job_dir / "app" / "config"
+        config_dir.mkdir(parents=True)
+        (job_dir / "meta.json").write_text("{}", encoding="utf-8")
+        (config_dir / "config_fed_server.json").write_text("{}", encoding="utf-8")
+        shutil.copytree(job_dir, temp_job_dir)
+        args = argparse.Namespace(job_folder=str(job_dir), config_file=None, script=None)
+
+        job_cli.prepare_job_config(args, ["app"], str(temp_job_dir))
+
+        assert json.loads((temp_job_dir / "meta.json").read_text(encoding="utf-8")) == {}
