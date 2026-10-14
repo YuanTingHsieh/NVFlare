@@ -36,12 +36,16 @@ class HeartbeatMonitor(Thread):
         self.curr_time = 0
         config = CommConfigurator()
         self.interval = config.get_heartbeat_interval(DEFAULT_HEARTBEAT_INTERVAL)
+        self.timeout = config.get_sfm_heartbeat_timeout(3 * self.interval)
+        if self.timeout <= self.interval:
+            raise ValueError("sfm_heartbeat_timeout must be greater than heartbeat_interval")
         self.send_stall_timeout = config.get_sfm_send_stall_timeout(45.0)
         self.close_stalled_connection = config.get_sfm_close_stalled_connection(False)
         self.stall_consecutive_checks = max(
             1, config.get_sfm_send_stall_consecutive_checks(DEFAULT_SEND_STALL_CONSECUTIVE_CHECKS)
         )
         self.stall_counts = {}
+        self.timed_out_keys = set()
         if self.interval < HEARTBEAT_TICK:
             log.warning(f"Heartbeat interval is too small ({self.interval} < {HEARTBEAT_TICK})")
 
@@ -52,7 +56,7 @@ class HeartbeatMonitor(Thread):
 
         while not self.stopped.is_set():
             try:
-                self.curr_time = time.time()
+                self.curr_time = time.monotonic()
                 self._check_heartbeat()
             except Exception as ex:
                 log.error(f"Heartbeat check failed: {ex}")
@@ -87,6 +91,20 @@ class HeartbeatMonitor(Thread):
             if caps and not caps.get(DriverCap.SEND_HEARTBEAT.value, False):
                 continue
 
+            # No heartbeat can be sent before the endpoint handshake completes.
+            # Once established, any incoming frame (including PONG) proves the
+            # peer is responsive and resets the receive-idle deadline.
+            if (
+                sfm_conn.last_activity
+                and sfm_conn.sfm_endpoint
+                and self.curr_time - sfm_conn.last_activity > self.timeout
+            ):
+                if conn_key not in self.timed_out_keys:
+                    log.warning(f"No frame received from {sfm_conn.conn} for {self.timeout}s; closing connection")
+                    sfm_conn.conn.close()
+                    self.timed_out_keys.add(conn_key)
+                continue
+
             if self.curr_time - sfm_conn.last_activity > self.interval:
                 sfm_conn.send_heartbeat(Types.PING)
                 log.debug(f"Heartbeat sent to connection: {sfm_conn.conn}")
@@ -94,3 +112,4 @@ class HeartbeatMonitor(Thread):
         stale_keys = [k for k in self.stall_counts.keys() if k not in active_keys]
         for k in stale_keys:
             self.stall_counts.pop(k, None)
+        self.timed_out_keys.intersection_update(active_keys)

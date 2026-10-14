@@ -130,7 +130,6 @@ class Servicer(StreamerServicer):
     def Stream(self, request_iterator, context):
         connection = None
         oq = QQ()
-        t = None
         ct = threading.current_thread()
         conn_props = {
             DriverParams.PEER_ADDR.value: context.peer(),
@@ -146,18 +145,19 @@ class Servicer(StreamerServicer):
             if not self.server.driver.add_connection(connection):
                 return
             self.logger.debug(f"SERVER created read_loop thread in thread {ct.name}")
-            t = threading.Thread(target=connection.read_loop, args=(request_iterator,), name="grpc_reader", daemon=True)
-            t.start()
+            threading.Thread(
+                target=connection.read_loop, args=(request_iterator,), name="grpc_reader", daemon=True
+            ).start()
             yield from connection.generate_output()
         except Exception as ex:
             self.logger.error(f"Connection closed due to error: {secure_format_exception(ex)}")
         finally:
-            if t is not None:
-                t.join()
             if connection:
                 connection.close()
                 self.logger.debug(f"SERVER: closing connection {connection.name}")
                 self.server.driver.close_connection(connection)
+            # The request iterator can remain blocked until this RPC returns.
+            # Joining its reader here would keep the stream open indefinitely.
             self.logger.debug(f"SERVER: finished Stream CB in thread {ct.name}")
 
 

@@ -33,6 +33,7 @@ class VarName:
     SUBNET_TROUBLE_THRESHOLD = "subnet_trouble_threshold"
     COMM_DRIVER_PATH = "comm_driver_path"
     HEARTBEAT_INTERVAL = "heartbeat_interval"
+    SFM_HEARTBEAT_TIMEOUT = "sfm_heartbeat_timeout"
     USE_AIO_GRPC_VAR_NAME = "use_aio_grpc"
     STREAMING_CHUNK_SIZE = "streaming_chunk_size"
     STREAMING_MAX_BLOB_SIZE = "streaming_max_blob_size"
@@ -105,6 +106,9 @@ class CommConfigurator:
 
     def get_heartbeat_interval(self, default):
         return ConfigService.get_int_var(VarName.HEARTBEAT_INTERVAL, self.config, default=default)
+
+    def get_sfm_heartbeat_timeout(self, default):
+        return ConfigService.get_float_var(VarName.SFM_HEARTBEAT_TIMEOUT, self.config, default=default)
 
     def use_aio_grpc(self, default):
         return ConfigService.get_bool_var(VarName.USE_AIO_GRPC_VAR_NAME, self.config, default)

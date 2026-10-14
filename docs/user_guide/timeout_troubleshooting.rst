@@ -376,6 +376,32 @@ System-level (``comm_config.json`` in startup kit):
    }
 
 
+F3 Connection Heartbeat (``comm_config.json``)
+---------------------------------------------
+
+F3 sends a PING after a connection has received no frames for
+``heartbeat_interval`` seconds (60 seconds by default). If no frame, including
+a PONG, arrives for ``sfm_heartbeat_timeout`` seconds, F3 closes the connection.
+The default timeout is three times ``heartbeat_interval`` (180 seconds with the
+default interval); the heartbeat monitor checks every five seconds. Active
+connectors then retry. Receiving data also resets the deadline, so an active
+peer does not need to answer a PING separately.
+
+Set ``sfm_heartbeat_timeout`` greater than ``heartbeat_interval`` in each
+site's ``comm_config.json`` to tune this transport-level deadline. For example:
+
+.. code-block:: json
+
+   {
+     "heartbeat_interval": 10,
+     "sfm_heartbeat_timeout": 30
+   }
+
+This timeout changes connection state and starts reconnect; it does not decide
+whether a job fails. The server's client heartbeat and the job's minimum and
+required-client policies make that decision separately.
+
+
 Streaming Stall Guardrail (``comm_config.json``)
 ------------------------------------------------
 

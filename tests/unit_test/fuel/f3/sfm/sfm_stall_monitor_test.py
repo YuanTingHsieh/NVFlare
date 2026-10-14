@@ -48,6 +48,7 @@ class FakeSfmConn:
     def __init__(self, stall_sec, last_activity, send_heartbeat_supported=True):
         self._stall_sec = stall_sec
         self.last_activity = last_activity
+        self.sfm_endpoint = object()
         self.conn = FakeConnObj(send_heartbeat_supported=send_heartbeat_supported)
         self.send_heartbeat = MagicMock()
 
@@ -105,8 +106,20 @@ class BlockingSendConn:
 
 
 class TestSfmStallMonitor:
-    def _make_monitor(self, monkeypatch, *, hb_interval, stall_timeout, close_enabled, conns, consecutive_checks=1):
+    def _make_monitor(
+        self,
+        monkeypatch,
+        *,
+        hb_interval,
+        stall_timeout,
+        close_enabled,
+        conns,
+        consecutive_checks=1,
+        heartbeat_timeout=None,
+    ):
         monkeypatch.setattr(CommConfigurator, "get_heartbeat_interval", lambda self, default: hb_interval)
+        if heartbeat_timeout is not None:
+            monkeypatch.setattr(CommConfigurator, "get_sfm_heartbeat_timeout", lambda self, default: heartbeat_timeout)
         monkeypatch.setattr(CommConfigurator, "get_sfm_send_stall_timeout", lambda self, default: stall_timeout)
         monkeypatch.setattr(
             CommConfigurator, "get_sfm_close_stalled_connection", lambda self, default=False: close_enabled
@@ -214,6 +227,72 @@ class TestSfmStallMonitor:
         monitor._check_heartbeat()
 
         sfm_conn.send_heartbeat.assert_not_called()
+
+    def test_missing_heartbeat_closes_once_after_receive_deadline(self, monkeypatch):
+        sfm_conn = FakeSfmConn(stall_sec=0.0, last_activity=100.0)
+        monitor = self._make_monitor(
+            monkeypatch,
+            hb_interval=10,
+            heartbeat_timeout=25,
+            stall_timeout=30.0,
+            close_enabled=False,
+            conns={"c1": sfm_conn},
+        )
+
+        monitor.curr_time = 111.0
+        monitor._check_heartbeat()
+        sfm_conn.send_heartbeat.assert_called_once_with(Types.PING)
+        sfm_conn.conn.close.assert_not_called()
+
+        monitor.curr_time = 126.0
+        monitor._check_heartbeat()
+        monitor._check_heartbeat()
+        sfm_conn.conn.close.assert_called_once()
+
+    def test_incoming_frame_resets_heartbeat_deadline(self, monkeypatch):
+        sfm_conn = FakeSfmConn(stall_sec=0.0, last_activity=100.0)
+        monitor = self._make_monitor(
+            monkeypatch,
+            hb_interval=10,
+            heartbeat_timeout=25,
+            stall_timeout=30.0,
+            close_enabled=False,
+            conns={"c1": sfm_conn},
+        )
+
+        monitor.curr_time = 111.0
+        monitor._check_heartbeat()
+        sfm_conn.last_activity = 125.0  # PONG or any other frame
+        monitor.curr_time = 126.0
+        monitor._check_heartbeat()
+        sfm_conn.conn.close.assert_not_called()
+
+    def test_heartbeat_timeout_waits_for_handshake(self, monkeypatch):
+        sfm_conn = FakeSfmConn(stall_sec=0.0, last_activity=100.0)
+        sfm_conn.sfm_endpoint = None
+        monitor = self._make_monitor(
+            monkeypatch,
+            hb_interval=10,
+            heartbeat_timeout=25,
+            stall_timeout=30.0,
+            close_enabled=False,
+            conns={"c1": sfm_conn},
+        )
+
+        monitor.curr_time = 200.0
+        monitor._check_heartbeat()
+        sfm_conn.conn.close.assert_not_called()
+
+    def test_heartbeat_timeout_must_exceed_ping_interval(self, monkeypatch):
+        with pytest.raises(ValueError, match="sfm_heartbeat_timeout must be greater"):
+            self._make_monitor(
+                monkeypatch,
+                hb_interval=10,
+                heartbeat_timeout=10,
+                stall_timeout=30.0,
+                close_enabled=False,
+                conns={},
+            )
 
     def test_monitor_has_no_stall_warning_in_normal_non_stalled_flow(self, monkeypatch, caplog):
         sfm_conn = FakeSfmConn(stall_sec=0.0, last_activity=0.0)
