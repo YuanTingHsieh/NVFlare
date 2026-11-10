@@ -602,7 +602,8 @@ class _TaskCJHandle(JobHandleSpec):
 
     def _terminate_for_heartbeat_cleanup(self):
         self.owner.release()
-        return self.handle._terminate_for_heartbeat_cleanup()
+        cleanup = getattr(self.handle, "_terminate_for_heartbeat_cleanup", self.handle.terminate)
+        return cleanup()
 
     def poll(self):
         code = self.handle.poll()
