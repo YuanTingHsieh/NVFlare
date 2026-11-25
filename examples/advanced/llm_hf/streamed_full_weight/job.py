@@ -32,7 +32,13 @@ from torch.utils.checkpoint import checkpoint
 from transformers import AutoConfig, AutoTokenizer
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm, LlamaRotaryEmbedding
 
-from nvflare.app_opt.pt.lazy_tensor_dict import _LazyRef, _TempDirRef, read_safetensors_metadata, safetensors_refs
+from nvflare.app_opt.pt.lazy_tensor_dict import (
+    _LazyRef,
+    _TempDirRef,
+    read_safetensors_metadata,
+    safetensors_refs,
+    write_safetensors,
+)
 
 EMBED = "model.embed_tokens.weight"
 HEAD = "lm_head.weight"
@@ -51,23 +57,22 @@ def tile_key(key, start):
     return f"{key}.{start:06d}"
 
 
-def prepare_checkpoint(model_dir, destination, vocab_size):
-    """Split large tensors for transfer and hard-link shards with remaining tensors."""
+def checkpoint_layout(model_dir):
     index = model_dir / "model.safetensors.index.json"
     if index.is_file():
         sources = json.loads(index.read_text())["weight_map"]
     else:
-        with safe_open(model_dir / "model.safetensors", framework="pt") as weights:
-            sources = dict.fromkeys(weights.keys(), "model.safetensors")
+        sources = dict.fromkeys(read_safetensors_metadata(str(model_dir / "model.safetensors")), "model.safetensors")
     if any(Path(name).name != name for name in sources.values()):
         raise ValueError("Expected safetensors shard filenames beside the index")
+    shards = {shard: read_safetensors_metadata(str(model_dir / shard)) for shard in dict.fromkeys(sources.values())}
+    return sources, {key: shards[shard][key] for key, shard in sources.items()}
+
+
+def prepare_checkpoint(model_dir, destination, vocab_size):
+    """Split large tensors for transfer and hard-link shards with remaining tensors."""
+    sources, metadata = checkpoint_layout(model_dir)
     destination.mkdir(mode=0o700)
-    metadata = {
-        key: item
-        for shard in set(sources.values())
-        for key, item in read_safetensors_metadata(str(model_dir / shard)).items()
-        if sources.get(key) == shard
-    }
     weight_map = {}
     kept_shards = set()
     for key, shard in sources.items():
@@ -94,6 +99,65 @@ def prepare_checkpoint(model_dir, destination, vocab_size):
     index = destination / "model.safetensors.index.json"
     index.write_text(json.dumps({"weight_map": weight_map}))
     return index
+
+
+def restored_weights(base_metadata, checkpoint):
+    """Yield one restored parameter at a time in the base checkpoint's order."""
+    metadata = read_safetensors_metadata(str(checkpoint))
+    tiles = {}
+    for key in metadata.keys() - base_metadata.keys():
+        name, _, offset = key.rpartition(".")
+        if name not in base_metadata or not offset.isdecimal() or key != tile_key(name, int(offset)):
+            raise ValueError(f"Unexpected checkpoint key {key}")
+        tiles.setdefault(name, []).append((int(offset), key))
+
+    with safe_open(checkpoint, framework="pt", backend="pread") as weights:
+        for name, original in base_metadata.items():
+            if name in metadata:
+                if original != metadata[name] or name in tiles:
+                    raise ValueError(f"Invalid full tensor {name}")
+                yield name, weights.get_tensor(name)
+                continue
+
+            end = 0
+            for start, key in sorted(tiles.get(name, ())):
+                tile = metadata[key]
+                if (
+                    start != end
+                    or not tile.shape
+                    or not tile.shape[0]
+                    or tile.shape[1:] != original.shape[1:]
+                    or tile.dtype != original.dtype
+                    or start + tile.shape[0] > original.shape[0]
+                ):
+                    raise ValueError(f"Invalid row tile {key}")
+                piece = weights.get_tensor(key)
+                if start == 0:
+                    tensor = piece.new_empty(original.shape)
+                end = start + tile.shape[0]
+                tensor[start:end].copy_(piece)
+                del piece
+            if end == 0 or end != original.shape[0]:
+                raise ValueError(f"Incomplete checkpoint tensor {name}")
+            yield name, tensor
+            del tensor
+
+
+def restore_checkpoint(model_dir, checkpoint, destination, config):
+    """Write a Transformers checkpoint with the original tensor names and layout."""
+    if destination.exists():
+        raise FileExistsError(destination)
+    _, metadata = checkpoint_layout(model_dir)
+    with tempfile.TemporaryDirectory(prefix=".llama-checkpoint-", dir=destination.parent) as staging:
+        output = Path(staging) / "model"
+        output.mkdir()
+        write_safetensors(str(output / "model.safetensors"), metadata, restored_weights(metadata, checkpoint))
+        config.save_pretrained(output)
+        AutoTokenizer.from_pretrained(model_dir, local_files_only=True).save_pretrained(output)
+        generation_config = model_dir / "generation_config.json"
+        if generation_config.is_file():
+            (output / generation_config.name).write_bytes(generation_config.read_bytes())
+        output.rename(destination)
 
 
 class DenseStep:
@@ -331,14 +395,17 @@ def configure_job(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["prepare", "train", "simulate", "export"])
+    parser.add_argument("action", choices=["prepare", "train", "simulate", "export", "restore"])
     parser.add_argument("model_dir", type=lambda value: Path(value).resolve())
     parser.add_argument("--workspace", required=True, type=lambda value: Path(value).resolve())
     parser.add_argument("--index", type=lambda value: Path(value).resolve())
+    parser.add_argument(
+        "--checkpoint", type=lambda value: Path(value).resolve(), help="Aggregated safetensors to restore"
+    )
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
     parser.add_argument("--rounds", type=int, default=1)
-    parser.add_argument("--gpus-per-node", type=int, default=4)
-    parser.add_argument("--time", default="02:00:00", help="Slurm time limit for the client job and task allocations")
+    parser.add_argument("--gpus-per-node", type=int, default=1)
+    parser.add_argument("--time", default="00:45:00", help="Slurm time limit for each worker allocation")
     args = parser.parse_args()
     if args.rounds < 1 or args.gpus_per_node < 1:
         parser.error("--rounds and --gpus-per-node must be positive")
@@ -347,6 +414,11 @@ def main():
         parser.error("Provide an untied Llama checkpoint")
     if args.action == "prepare":
         print(prepare_checkpoint(args.model_dir, args.workspace, config.vocab_size))
+    elif args.action == "restore":
+        if not args.checkpoint or not args.checkpoint.is_file():
+            parser.error("--checkpoint must reference FL_global_model.safetensors")
+        restore_checkpoint(args.model_dir, args.checkpoint, args.workspace, config)
+        print(args.workspace)
     elif args.action == "train":
         train_client(args.model_dir, args.device, args.workspace)
     else:

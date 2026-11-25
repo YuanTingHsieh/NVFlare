@@ -30,13 +30,48 @@ from safetensors.torch import save_file
 
 import nvflare.app_opt.pt.tensor_downloader as tensor_downloader
 from nvflare.app_opt.pt.lazy_tensor_dict import safetensors_refs
-from nvflare.app_opt.pt.tensor_downloader import TensorDownloadable
+from nvflare.app_opt.pt.tensor_downloader import DiskTensorConsumer, TensorDownloadable
 from nvflare.fuel.f3.streaming.download_service import ProduceRC
 from tests.timing_utils import WAIT_TIMEOUT, ThreadGroup
 
 
 def _open_paths():
     return {file.path for file in psutil.Process().open_files()}
+
+
+@pytest.mark.parametrize("drop_cache", [False, True])
+def test_disk_stream_cache_advice(tmp_path, monkeypatch, drop_cache):
+    path = tmp_path / "model.safetensors"
+    value = torch.arange(4.0)
+    save_file({"weight": value}, path)
+    download = TensorDownloadable(safetensors_refs(str(path)), max_chunk_size=1024)
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    consumer = DiskTensorConsumer(str(spool))
+    calls = []
+
+    def sync(fd):
+        assert os.fstat(fd).st_size > 0
+        calls.append("sync")
+
+    def advise(fd, offset, length, advice):
+        assert (offset, length, advice) == (0, 0, os.POSIX_FADV_DONTNEED)
+        assert os.fstat(fd).st_size > 0
+        calls.append("advise")
+
+    monkeypatch.setattr(tensor_downloader, "_DROP_FILE_CACHE", drop_cache)
+    monkeypatch.setattr(os, "POSIX_FADV_DONTNEED", 4, raising=False)
+    monkeypatch.setattr(os, "posix_fadvise", advise, raising=False)
+    monkeypatch.setattr(os, "fdatasync", sync, raising=False)
+    try:
+        item = download.produce_item(0)
+        result = consumer.consume_items([item], None)
+        assert set(result) == {"weight"}
+        torch.testing.assert_close(load_tensors(item)["weight"], value)
+        assert calls == (["advise", "sync", "advise"] if drop_cache else [])
+    finally:
+        consumer.cleanup()
+        download.release()
 
 
 class TestTensorDownloadableBasic:

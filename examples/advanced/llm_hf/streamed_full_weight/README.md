@@ -1,6 +1,12 @@
 # Streamed full-weight Llama FedAvg
 
-This proof of concept runs one full-weight SGD step per client and streams the complete BF16 model through disk-backed FedAvg. The [pilot report](pilot-report.pdf) records the two-client Llama 3 70B run, including process placement, timings and measured memory.
+This proof of concept runs one full-weight SGD step per client per round and streams the complete BF16 model through disk-backed FedAvg.
+
+## Recorded 70B pilot
+
+The [pilot report](pilot-report.pdf) describes one round with two clients and one short synthetic prompt per client. Both sites uploaded full-weight updates, the server accepted both, and the saved 70,553,706,496-parameter checkpoint had a changed slice of the output projection. The pilot measured execution and memory. It did not check the numerical mean of both client updates, training quality, or multiple rounds at 70B.
+
+The [original training script](pilot/streamed_full_weight_smoke.py.txt) is preserved byte-for-byte. It ran with a patched `2.10.0.dev261119` runtime that already exposed the recipe's `execution_lifetime` argument. The instructions below use the port in `job.py` and the upstream Process coordinator support from [PR #5771](https://github.com/NVIDIA/NVFlare/pull/5771). They reproduce the process placement. The 70B timings and memory figures apply to the original run.
 
 ## Prepare and export the job
 
@@ -18,7 +24,7 @@ mkdir -p "$work"
 python "$example/job.py" prepare "$model" --workspace "$work/prepared"
 python "$example/job.py" export "$model" \
   --index "$work/prepared/model.safetensors.index.json" \
-  --workspace "$work/jobs" --device cuda --rounds 1 --gpus-per-node 4
+  --workspace "$work/jobs" --device cuda --rounds 1
 ```
 
 The preparation step splits large tensors into pieces of up to 32 MiB. It hard-links shards that still contain unsplit tensors, so the original checkpoint and prepared directory must be on the same filesystem. The model, prepared index and experiment paths must be visible at the same absolute paths from the relevant processes.
@@ -31,9 +37,9 @@ submit_job /shared/experiments/llama3-70b/jobs/llama-streamed-full-weight-smoke
 
 ## Deploy on Slurm
 
-Provision one server and clients named `site-1` and `site-2`. Run the server parent and server job together in a 64 GiB CPU Slurm allocation with the process server job launcher. Start each client parent (CP) on a CPU host with scheduler access. On this branch, `ClientSlurmJobLauncher` submits a separate CPU client job (CJ) allocation, and `SlurmTaskLauncher` runs each `train` task in a separate GPU allocation. In the recorded pilot, each CP and its CJ shared a 16 GiB CPU allocation.
+Provision one server and clients named `site-1` and `site-2`. Run the server parent (SP) and server job (SJ) together in a 64 GiB CPU Slurm allocation with the process server job launcher. Run each client parent (CP) in its own 16 GiB CPU Slurm allocation with scheduler access. `ClientProcessJobLauncher` starts the client job (CJ) as a process in that same allocation. The CJ requests GPU task workers through its CP, which submits them to Slurm. Each worker runs in a separate allocation.
 
-Use the [Slurm task deployment guide](../../../../docs/user_guide/admin_guide/deployment/slurm_task_launcher.rst) to prepare each client's workspace. In the generated `ClientSlurmJobLauncher` component, set `cj_memory_mb` to `16384`, use the CPU partition and include `export NVFLARE_DENSE_DISK_TASK_TENSORS=1` in the launcher's `setup` so the CJ keeps verified task tensors on disk. Each GPU worker requests 8 GiB of host RAM and uses one CUDA device. The exported job requests four GPUs per worker by default. Set `--gpus-per-node` to match your cluster. The exported Slurm time limit defaults to two hours for both the CJ and task allocations. Increase it with `--time` for longer campaigns.
+Each worker requests one GPU, 8 GiB of host RAM and 45 minutes in Slurm. Set `--gpus-per-node` if your site's scheduler requires a larger allocation. The training script uses one visible GPU. Size the SP and CP allocations to cover the whole campaign, including scheduler waits and result uploads.
 
 On the server, create a private, disk-backed temporary directory and set these environment variables before starting the parent. The server job inherits them.
 
@@ -45,10 +51,16 @@ mkdir -p -m 700 "$TMPDIR"
 
 Choose a disk-backed filesystem for `TMPDIR`. Two 70B BF16 updates occupy about 282 GB before aggregation. The global checkpoint and its archive each occupy about 141 GB. Allow additional space for the initial checkpoint, client artifacts and in-progress files. The pilot used a 1 TB free-space check for campaign scratch.
 
-Add a `task_execution` section to each client's local resources configuration. Use the same workspace as the client job launcher and set the Slurm account and GPU partition for that site:
+Export `NVFLARE_DENSE_DISK_TASK_TENSORS=1` before starting each CP so its CJ keeps verified task tensors on disk. Merge these settings into each client's `local/resources.json`. Set the client workspace, the compute-reachable host of the CP/CJ allocation, and the Slurm account and GPU partition for that site. See the [Slurm task deployment guide](../../../../docs/user_guide/admin_guide/deployment/slurm_task_launcher.rst#process-cj-on-a-login-node-or-submit-host).
 
 ```json
 {
+  "components": [
+    {
+      "id": "job_launcher",
+      "path": "nvflare.app_common.job_launcher.client_process_launcher.ClientProcessJobLauncher"
+    }
+  ],
   "task_execution": {
     "artifact_cleanup": "receipt",
     "worker_timeout": 2400,
@@ -58,12 +70,13 @@ Add a `task_execution` section to each client's local resources configuration. U
       "path": "nvflare.app_opt.job_launcher.slurm.task_launcher.SlurmTaskLauncher",
       "args": {
         "workspace_path": "/shared/flare/site-1",
+        "worker_listener_host": "client-cpu-node.example.org",
         "python_path": "/shared/venv/bin/python",
         "shared_filesystem": true,
         "cgroup_enforced": true,
         "cpu_cores": 4,
         "memory_mb": 8192,
-        "gpu_count": 4,
+        "gpu_count": 1,
         "pending_timeout": 1800,
         "sbatch_directives": {
           "partition": "batch",
@@ -80,6 +93,20 @@ Add a `task_execution` section to each client's local resources configuration. U
 
 The client site settings above allow 40 minutes for the GPU worker. The job configures a 45-minute result submission timeout. In the pilot, each 141 GB upload completed in about 14 minutes on its first attempt.
 
-## Verify the output
+## Verify and restore the output
 
-Check that the workflow reports `Aggregated 2/2 results` and the job reaches `FINISHED:COMPLETED`. The job's output archive contains `FL_global_model.safetensors`. The pilot counted 70,553,706,496 parameters in the saved checkpoint and confirmed that a 32-row slice of the output projection changed from the base model. The test used one synthetic prompt per client and measured execution and memory usage.
+Check that the workflow reports `Aggregated 2/2 results` and the job reaches `FINISHED:COMPLETED`. Extract `FL_global_model.safetensors` from the job's output archive. It stores the federated weights under NVFlare's tiled keys. Restore the original Llama tensor names and shapes before loading it with Transformers:
+
+```bash
+python "$example/job.py" restore "$model" \
+  --checkpoint "$work/output/FL_global_model.safetensors" \
+  --workspace "$work/restored-model"
+```
+
+The restored directory contains `model.safetensors`, the model config and the tokenizer. Restoration validates tile coverage, shapes and dtypes against the base checkpoint. It needs room on disk for a second copy of the weights and uses host memory for one full parameter plus one tile at a time.
+
+Local validation used a tiny BF16 Llama checkpoint for three rounds with two simulated clients. Every saved tensor matched the mean of the two client updates, both transformer blocks changed, and Transformers loaded the restored model and produced finite logits. The Slurm job export and site configuration were checked separately.
+
+## Runtime changes
+
+NVFlare already provides task execution, disk-backed FedAvg, and disk-backed tensor streaming. The pilot changes carried in this branch avoid read-ahead during checkpoint header scans, keep verified task artifacts as lazy references, advise the kernel to drop cached streaming pages, and release settled stream task handles. The two environment variables are process-level pilot switches. The page-cache switch is read when the streaming module loads, so set it only on the server for this example. The example uses internal lazy-tensor types and is tied to this branch.
