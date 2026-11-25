@@ -1,0 +1,359 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Run one out-of-core dense SGD step per site and round on an untied Llama."""
+
+import argparse
+import json
+import math
+import os
+import resource
+import sys
+import tempfile
+from functools import partial
+from pathlib import Path
+
+import torch
+from safetensors import safe_open
+from safetensors.torch import save_file
+from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
+from transformers import AutoConfig, AutoTokenizer
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm, LlamaRotaryEmbedding
+
+from nvflare.app_opt.pt.lazy_tensor_dict import _LazyRef, _TempDirRef, read_safetensors_metadata, safetensors_refs
+
+EMBED = "model.embed_tokens.weight"
+HEAD = "lm_head.weight"
+NORM = "model.norm.weight"
+ROW_CHUNK = 1024
+MAX_TILE_BYTES = 32 * 1024**2
+LEARNING_RATE = 0.01
+JOB_NAME = "llama-streamed-full-weight-smoke"
+SAMPLES = {
+    "site-1": "Instruction: Name a fruit. Response: An apple is a fruit.",
+    "site-2": "Instruction: Name a vegetable. Response: A carrot is a vegetable.",
+}
+
+
+def tile_key(key, start):
+    return f"{key}.{start:06d}"
+
+
+def prepare_checkpoint(model_dir, destination, vocab_size):
+    """Split large tensors for transfer and hard-link shards with remaining tensors."""
+    index = model_dir / "model.safetensors.index.json"
+    if index.is_file():
+        sources = json.loads(index.read_text())["weight_map"]
+    else:
+        with safe_open(model_dir / "model.safetensors", framework="pt") as weights:
+            sources = dict.fromkeys(weights.keys(), "model.safetensors")
+    if any(Path(name).name != name for name in sources.values()):
+        raise ValueError("Expected safetensors shard filenames beside the index")
+    destination.mkdir(mode=0o700)
+    metadata = {
+        key: item
+        for shard in set(sources.values())
+        for key, item in read_safetensors_metadata(str(model_dir / shard)).items()
+        if sources.get(key) == shard
+    }
+    weight_map = {}
+    kept_shards = set()
+    for key, shard in sources.items():
+        item = metadata[key]
+        if key in (EMBED, HEAD):
+            if item.shape[0] != vocab_size:
+                raise ValueError(f"Unexpected vocabulary size for {key}")
+            row_count = ROW_CHUNK
+        elif item.nbytes > MAX_TILE_BYTES:
+            row_count = max(1, MAX_TILE_BYTES // (item.nbytes // item.shape[0]))
+        else:
+            weight_map[key] = shard
+            kept_shards.add(shard)
+            continue
+        with safe_open(model_dir / shard, framework="pt") as weights:
+            rows = weights.get_slice(key)
+            for start in range(0, item.shape[0], row_count):
+                name = tile_key(key, start)
+                filename = f"{name}.safetensors"
+                save_file({name: rows[start : start + row_count]}, destination / filename)
+                weight_map[name] = filename
+    for shard in kept_shards:
+        os.link(model_dir / shard, destination / shard)
+    index = destination / "model.safetensors.index.json"
+    index.write_text(json.dumps({"weight_map": weight_map}))
+    return index
+
+
+class DenseStep:
+    def __init__(self, config, params, output, device, learning_rate=LEARNING_RATE):
+        if config.tie_word_embeddings:
+            raise ValueError("The dense step requires separate input embeddings and output weights")
+        self.config = config
+        self.params = params
+        self.output = output
+        self.device = torch.device(device)
+        self.learning_rate = learning_rate
+        self.updated = {}
+        self.tiles = {}
+        for key in sorted(params):
+            name, _, offset = key.rpartition(".")
+            if offset.isdecimal():
+                self.tiles.setdefault(name, []).append(key)
+        self.rotary = LlamaRotaryEmbedding(config).to(device)
+
+    def weight(self, key):
+        value = self.params[key]
+        if isinstance(value, _LazyRef):
+            value = value.materialize()
+        return value.to(self.device)
+
+    def write(self, key, weight):
+        if key in self.updated:
+            raise ValueError(f"Unexpected second update for {key}")
+        path = Path(self.output.path) / f"{key}.safetensors"
+        save_file({key: weight.detach().cpu().contiguous()}, path)
+        self.updated.update(safetensors_refs(str(path), self.output))
+
+    def apply_gradient(self, keys, parameter):
+        # The checkpoint still uses the original weights for input gradients.
+        with torch.no_grad():
+            if len(keys) == 1:
+                self.write(keys[0], parameter.add(parameter.grad, alpha=-self.learning_rate))
+            else:
+                starts = [int(key.rsplit(".", 1)[1]) for key in keys]
+                for key, start, end in zip(keys, starts, starts[1:] + [parameter.shape[0]]):
+                    self.write(key, parameter[start:end].add(parameter.grad[start:end], alpha=-self.learning_rate))
+            parameter.grad = None
+
+    def module_weights(self, module, prefix):
+        weights = {}
+        for key in module.state_dict():
+            name = prefix + key
+            tiles = self.tiles.get(name)
+            weights[key] = torch.cat([self.weight(tile) for tile in tiles]) if tiles else self.weight(name)
+        module.load_state_dict(weights, assign=True)
+        if torch.is_grad_enabled():
+            for key, parameter in module.named_parameters():
+                name = prefix + key
+                parameter.register_post_accumulate_grad_hook(
+                    partial(self.apply_gradient, self.tiles.get(name, (name,)))
+                )
+        return module
+
+    def block(self, number, mask, rope, hidden):
+        if self.device.type == "cuda":
+            if number % 10 == 0:
+                usage = resource.getrusage(resource.RUSAGE_SELF)
+                print(
+                    json.dumps(
+                        {
+                            "event": "dense_block",
+                            "phase": "backward" if torch.is_grad_enabled() else "forward",
+                            "block": number,
+                            "peak_rss_bytes": usage.ru_maxrss * 1024,
+                            "peak_cuda_reserved_bytes": torch.cuda.max_memory_reserved(),
+                        }
+                    ),
+                    flush=True,
+                )
+            torch.cuda.empty_cache()
+        with torch.device("meta"):
+            layer = LlamaDecoderLayer(self.config, layer_idx=number).eval()
+        layer = self.module_weights(layer, f"model.layers.{number}.")
+        return layer(hidden, attention_mask=mask, position_embeddings=rope)
+
+    def norm(self, hidden):
+        with torch.device("meta"):
+            norm = LlamaRMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
+        norm = self.module_weights(norm, "model.norm.")
+        return norm(hidden)
+
+    def head(self, start, hidden):
+        key = tile_key(HEAD, start)
+        weight = self.weight(key).detach()
+        if torch.is_grad_enabled():
+            weight.requires_grad_()
+            weight.register_post_accumulate_grad_hook(partial(self.apply_gradient, (key,)))
+        return F.linear(hidden, weight).float()
+
+    def embedding(self, tokens, starts):
+        hidden = None
+        for start in starts:
+            mask = (tokens >= start) & (tokens < start + ROW_CHUNK)
+            weight = self.weight(tile_key(EMBED, start))
+            if hidden is None:
+                hidden = weight.new_empty((*tokens.shape, self.config.hidden_size))
+            hidden[mask] = F.embedding(tokens[mask] - start, weight)
+        return hidden.requires_grad_()
+
+    def update_embeddings(self, tokens, starts, hidden_grad):
+        for start in range(0, self.config.vocab_size, ROW_CHUNK):
+            key = tile_key(EMBED, start)
+            source = self.params[key]
+            if start not in starts and isinstance(source, _LazyRef):
+                self.updated[key] = source
+                continue
+            weight = self.weight(key)
+            mask = (tokens >= start) & (tokens < start + ROW_CHUNK)
+            grad = torch.zeros_like(weight)
+            grad.index_add_(0, tokens[mask] - start, hidden_grad[mask])
+            self.write(key, weight.add(grad, alpha=-self.learning_rate))
+
+    def run(self, tokens):
+        starts = set(((tokens // ROW_CHUNK) * ROW_CHUNK).unique().tolist())
+        embedding = self.embedding(tokens, starts)
+        length = tokens.shape[1]
+        positions = torch.arange(length, device=self.device)[None, :]
+        rope = self.rotary(embedding.detach(), positions)
+        mask = embedding.new_full((length, length), torch.finfo(embedding.dtype).min).triu_(1)[None, None]
+        hidden = embedding
+        for number in range(self.config.num_hidden_layers):
+            hidden = checkpoint(partial(self.block, number, mask, rope), hidden, use_reentrant=True)
+        hidden = checkpoint(self.norm, hidden[:, :-1], use_reentrant=True)
+        logits = [
+            checkpoint(partial(self.head, start), hidden, use_reentrant=True)
+            for start in range(0, self.config.vocab_size, ROW_CHUNK)
+        ]
+        logits = torch.cat(logits, dim=-1)
+        loss = F.cross_entropy(logits.flatten(0, 1), tokens[:, 1:].flatten())
+        if not math.isfinite(loss.item()):
+            raise RuntimeError("The dense training loss was non-finite")
+        loss.backward()
+        self.update_embeddings(tokens, starts, embedding.grad)
+        if self.updated.keys() != self.params.keys():
+            raise ValueError(f"Unexpected set of updated keys: {self.updated.keys() ^ self.params.keys()}")
+        return loss.item(), self.updated
+
+
+def train_client(model_dir, device, scratch):
+    import nvflare.client as flare
+    from nvflare.apis.fl_constant import FLMetaKey
+
+    flare.init()
+    incoming = flare.receive()
+    if incoming is None:
+        return
+    site = flare.system_info()["site_name"]
+    config = AutoConfig.from_pretrained(model_dir, local_files_only=True)
+    config._attn_implementation = "eager"
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+    tokens = tokenizer(SAMPLES[site], return_tensors="pt", truncation=True, max_length=64).input_ids.to(device)
+    current_round = incoming.current_round
+    lazy_input_count = sum(isinstance(value, _LazyRef) for value in incoming.params.values())
+    if os.environ.get("NVFLARE_DENSE_DISK_TASK_TENSORS") == "1" and lazy_input_count != len(incoming.params):
+        raise RuntimeError("The dense pilot expected all task tensors to remain on disk")
+    # Streaming can continue after send returns. The references own the output directory.
+    output = _TempDirRef(tempfile.mkdtemp(prefix="dense-step-", dir=scratch))
+    loss, weights = DenseStep(config, incoming.params, output, device).run(tokens)
+    count = sum(math.prod(ref.get_metadata().shape) for ref in weights.values())
+    flare.send(
+        flare.FLModel(
+            params_type=flare.ParamsType.FULL,
+            params=weights,
+            metrics={"train_loss": loss},
+            meta={FLMetaKey.NUM_STEPS_CURRENT_ROUND: 1},
+        )
+    )
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    measurement = {
+        "event": "dense_sgd_step",
+        "site": site,
+        "round": current_round,
+        "loss": loss,
+        "weight_parameters": count,
+        "lazy_input_tensors": lazy_input_count,
+        "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+        "peak_rss_bytes": rss if sys.platform == "darwin" else rss * 1024,
+    }
+    if device == "cuda":
+        measurement["peak_cuda_reserved_bytes"] = torch.cuda.max_memory_reserved()
+    print(json.dumps(measurement), flush=True)
+
+
+def configure_job(args):
+    from nvflare.apis.job_def import JobMetaKey
+    from nvflare.app_opt.pt.recipes.fedavg import FedAvgRecipe
+    from nvflare.recipe import SimEnv, set_recipe_meta
+
+    recipe = FedAvgRecipe(
+        name=JOB_NAME,
+        min_clients=len(SAMPLES),
+        num_rounds=args.rounds,
+        train_script=str(Path(__file__).resolve()),
+        train_args=[
+            "train",
+            str(args.model_dir),
+            "--device",
+            args.device,
+            "--workspace",
+            str(args.workspace.parent),
+        ],
+        initial_ckpt=str(args.index),
+        enable_disk_aggregation=True,
+        execution_lifetime="task" if args.action == "export" else "job",
+        key_metric="",
+    )
+    recipe.add_client_config({"submit_task_result_timeout": 2700})
+    if args.action == "export":
+        set_recipe_meta(
+            recipe,
+            JobMetaKey.JOB_LAUNCHER_SPEC,
+            {
+                site: {
+                    "slurm": {
+                        "nodes": 1,
+                        "gpus_per_node": args.gpus_per_node,
+                        "mem_per_node": 8192,
+                        "time": args.time,
+                    }
+                }
+                for site in SAMPLES
+            },
+        )
+        recipe.export(str(args.workspace))
+    else:
+        run = recipe.execute(SimEnv(clients=list(SAMPLES), num_threads=1, workspace_root=str(args.workspace)))
+        if not run.get_result(clean_up=False):
+            raise RuntimeError(f"Dense FedAvg simulation failed: {run.get_status()}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=["prepare", "train", "simulate", "export"])
+    parser.add_argument("model_dir", type=lambda value: Path(value).resolve())
+    parser.add_argument("--workspace", required=True, type=lambda value: Path(value).resolve())
+    parser.add_argument("--index", type=lambda value: Path(value).resolve())
+    parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
+    parser.add_argument("--rounds", type=int, default=1)
+    parser.add_argument("--gpus-per-node", type=int, default=4)
+    parser.add_argument("--time", default="02:00:00", help="Slurm time limit for the client job and task allocations")
+    args = parser.parse_args()
+    if args.rounds < 1 or args.gpus_per_node < 1:
+        parser.error("--rounds and --gpus-per-node must be positive")
+    config = AutoConfig.from_pretrained(args.model_dir, local_files_only=True)
+    if config.model_type != "llama" or config.tie_word_embeddings:
+        parser.error("Provide an untied Llama checkpoint")
+    if args.action == "prepare":
+        print(prepare_checkpoint(args.model_dir, args.workspace, config.vocab_size))
+    elif args.action == "train":
+        train_client(args.model_dir, args.device, args.workspace)
+    else:
+        if not args.index or not args.index.is_file():
+            parser.error("--index must reference the prepared safetensors index")
+        configure_job(args)
+
+
+if __name__ == "__main__":
+    main()

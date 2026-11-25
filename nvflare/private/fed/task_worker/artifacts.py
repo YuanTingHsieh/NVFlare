@@ -151,6 +151,10 @@ class _TensorFileSource:
             if _fingerprint(stream, remaining) != (entry["size"], entry["sha256"]):
                 raise ValueError("tensor artifact size or checksum mismatch")
         self.size += entry["size"]
+        if self.kind in (_INPUT_KIND, _RESULT_KIND) and os.environ.get("NVFLARE_DENSE_DISK_TASK_TENSORS") == "1":
+            from nvflare.app_opt.pt.lazy_tensor_dict import safetensors_refs
+
+            return safetensors_refs(path)[entry["key"]]
         with safe_open(path, framework="pt") as tensors:
             return tensors.get_tensor(entry["key"])
 

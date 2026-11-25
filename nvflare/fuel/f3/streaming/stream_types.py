@@ -170,6 +170,7 @@ class StreamFuture:
 
             self.error = StreamCancelled(f"Stream {self.stream_id} is cancelled")
             task_handle = self.task_handle
+            self.task_handle = None
             self.waiter.set()
 
         # TxTask.cancel() completes this same StreamFuture. Calling it while
@@ -273,6 +274,8 @@ class StreamFuture:
             if self.waiter.is_set():
                 raise StreamError("Invalid state, future is already done")
             self.value = value
+            # The task owns this future and can retain a large payload.
+            self.task_handle = None
             self.waiter.set()
 
         self._invoke_callbacks()
@@ -293,6 +296,7 @@ class StreamFuture:
                 log.debug(f"set_exception called on already-done future {self.stream_id}: {exception}")
                 return
             self.error = exception
+            self.task_handle = None
             self.waiter.set()
 
         self._invoke_callbacks()

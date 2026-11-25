@@ -24,7 +24,7 @@ from safetensors.torch import load, save_file
 from nvflare.apis.shareable import Shareable
 from nvflare.app_common.decomposers.numpy_decomposers import NumpyArrayDecomposer
 from nvflare.app_opt.pt.decomposers import TensorDecomposer
-from nvflare.app_opt.pt.lazy_tensor_dict import LazyTensorDict, safetensors_refs
+from nvflare.app_opt.pt.lazy_tensor_dict import LazyTensorDict, _LazyRef, safetensors_refs
 from nvflare.app_opt.pt.tensor_downloader import TensorDownloadable
 from nvflare.fuel.utils import fobs
 from nvflare.private.fed.task_worker import artifacts
@@ -58,6 +58,23 @@ def test_tensor_bytes_stay_out_of_fobs_and_nested_payload_round_trips(payload_st
     assert restored["epoch"] == 2
     assert np.array_equal(restored["array"], data["array"])
     assert all(torch.equal(a, b) for a, b in zip(tensors, restored["params"]["weights"]))
+
+
+@pytest.mark.parametrize("kind", ["input", "result"])
+def test_dense_task_artifact_read_keeps_verified_tensors_lazy(payload_store, monkeypatch, kind):
+    store, identity, directory = payload_store
+    monkeypatch.setenv("NVFLARE_DENSE_DISK_TASK_TENSORS", "1")
+    payload = Shareable({"w": torch.arange(6, dtype=torch.bfloat16)})
+    if kind == "input":
+        store.write_input(identity, payload)
+        restored = store.read_input(identity)
+    else:
+        store.commit_result(identity, payload)
+        restored, _ = store.read_result(identity)
+    ref = restored["w"]
+    assert isinstance(ref, _LazyRef)
+    assert Path(ref.file_path) == directory / f"{kind}.T0.safetensors"
+    assert torch.equal(ref.materialize(), payload["w"])
 
 
 def test_received_file_is_linked_and_survives_scratch_release(payload_store, tmp_path, monkeypatch):

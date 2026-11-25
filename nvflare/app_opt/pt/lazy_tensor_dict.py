@@ -46,6 +46,7 @@ from safetensors.torch import save as save_tensors
 logger = logging.getLogger(__name__)
 
 _HEADER_SIZE_FIELD = 8
+_MAX_HEADER_SIZE = 100_000_000  # safetensors format limit
 _MODEL_ID = "nvflare_model_id"
 
 
@@ -91,21 +92,40 @@ def _encode_header(metadata: Mapping[str, TensorMetadata]) -> bytes:
     return struct.pack("<Q", len(header_bytes)) + header_bytes
 
 
-def read_safetensors_metadata(source: str | bytes) -> dict[str, TensorMetadata]:
-    """Metadata from safetensors bytes or a file, reading only its header."""
-    if not isinstance(source, bytes):
-        with open(source, "rb") as tensor_file:
-            size_field = tensor_file.read(_HEADER_SIZE_FIELD)
-            header_size = struct.unpack("<Q", size_field)[0] if len(size_field) == _HEADER_SIZE_FIELD else 0
-            # A corrupt size field must not turn into a huge allocation; the parser reports the short read.
-            header = tensor_file.read(min(header_size, os.fstat(tensor_file.fileno()).st_size))
-        source = size_field + header
+def _read_file_header(file_path):
+    with open(file_path, "rb", buffering=0) as tensor_file:
+        fd = tensor_file.fileno()
+        if hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_RANDOM"):
+            try:
+                # Metadata scans touch only the start of each file. Sequential read-ahead
+                # can fetch megabytes of weights per file on network filesystems.
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_RANDOM)
+            except OSError:
+                logger.debug("Could not disable checkpoint header read-ahead for %s", file_path, exc_info=True)
+        file_size = os.fstat(fd).st_size
+        size_field = tensor_file.read(_HEADER_SIZE_FIELD)
+        header_size = int.from_bytes(size_field, "little")
+        if len(size_field) != _HEADER_SIZE_FIELD or not 0 < header_size <= min(
+            _MAX_HEADER_SIZE, file_size - _HEADER_SIZE_FIELD
+        ):
+            raise ValueError(f"Invalid safetensors header size in '{file_path}'")
+        header = read_safetensors_header(size_field + tensor_file.read(header_size))
+    return header, file_size - _HEADER_SIZE_FIELD - header_size
+
+
+def _tensor_metadata_from_header(header: dict) -> dict[str, TensorMetadata]:
     metadata = {}
-    for key, entry in read_safetensors_header(source).items():
+    for key, entry in header.items():
         if key != "__metadata__":
             start, end = entry["data_offsets"]
             metadata[key] = TensorMetadata(shape=tuple(entry["shape"]), dtype=entry["dtype"], nbytes=end - start)
     return metadata
+
+
+def read_safetensors_metadata(source: str | bytes) -> dict[str, TensorMetadata]:
+    """Metadata from safetensors bytes or a file, reading only its header."""
+    header = read_safetensors_header(source) if isinstance(source, bytes) else _read_file_header(source)[0]
+    return _tensor_metadata_from_header(header)
 
 
 @lru_cache(maxsize=None)
@@ -240,11 +260,20 @@ class _LazyRef:
 
 def safetensors_refs(file_path: str, temp_ref: Optional[_TempDirRef] = None) -> dict[str, _LazyRef]:
     """Return a lazy ref for every tensor in a safetensors file."""
-    with safe_open(file_path, framework="pt") as f:
-        model_id = (f.metadata() or {}).get(_MODEL_ID)
+    header, data_size = _read_file_header(file_path)
+    model_id = header.get("__metadata__", {}).get(_MODEL_ID)
+    offsets = sorted(tuple(entry["data_offsets"]) for key, entry in header.items() if key != "__metadata__")
+    end = 0
+    for start, next_end in offsets:
+        if start != end or not start <= next_end <= data_size:
+            raise ValueError(f"Invalid safetensors data offsets in '{file_path}'")
+        end = next_end
+    if end != data_size:
+        raise ValueError(f"Invalid safetensors data size in '{file_path}'")
+    # Native safetensors still validates dtype and shape when a tensor is opened.
     return {
         key: _LazyRef(file_path, key, temp_ref, metadata, model_id)
-        for key, metadata in read_safetensors_metadata(file_path).items()
+        for key, metadata in _tensor_metadata_from_header(header).items()
     }
 
 

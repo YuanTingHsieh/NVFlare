@@ -1,6 +1,8 @@
 # LLM Tuning via HuggingFace SFT/PEFT APIs
 This example shows how to use [NVIDIA FLARE](https://nvidia.github.io/NVFlare) for Large Language Models (LLMs) tuning tasks. It illustrates how to adapt a local training script with [HuggingFace](https://huggingface.co/) trainer to NVFlare.
 
+See the [streamed full-weight Llama pilot](streamed_full_weight/README.md) for a disk-backed FedAvg job with Slurm task workers.
+
 ## Introduction 
 This example illustrates both supervised fine-tuning (SFT) and parameter-efficient fine-tuning (PEFT) using the [SFT Trainer](https://huggingface.co/docs/trl/sft_trainer) from [HuggingFace](https://huggingface.co/) with [PEFT library](https://github.com/huggingface/peft).
 

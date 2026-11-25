@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 import os
 import tempfile
 import threading
@@ -37,9 +38,23 @@ from nvflare.fuel.f3.streaming.stream_utils import stream_thread_pool
 
 from .lazy_tensor_dict import _MODEL_ID, LazyTensorDict, _cleanup_temp_dir, _LazyRef, read_safetensors_metadata
 
+logger = logging.getLogger(__name__)
 _TWO_MB = 2 * 1024 * 1024
+_DROP_FILE_CACHE = (
+    os.getenv("NVFLARE_DENSE_SERVER_DROP_FILE_CACHE") == "1"
+    and hasattr(os, "fdatasync")
+    and hasattr(os, "posix_fadvise")
+    and hasattr(os, "POSIX_FADV_DONTNEED")
+)
 _ACTIVE_DISK_TENSOR_CONSUMERS = weakref.WeakSet()
 _ACTIVE_DISK_TENSOR_CONSUMERS_LOCK = threading.Lock()
+
+
+def _drop_file_cache(file):
+    try:
+        os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+    except OSError:
+        logger.debug("Could not release cached pages for %s", file.name, exc_info=True)
 
 
 def cleanup_active_disk_tensor_downloads(reason: str = "download aborted", root_dir: Optional[str] = None) -> None:
@@ -86,10 +101,18 @@ class TensorDownloadable(CacheableObject):
         if base_obj is None:
             raise RuntimeError(f"item {index} requested after tensors were released")
         tensor = base_obj[key]
-        if isinstance(tensor, _LazyRef):
-            reader = self._get_reader(tensor)
-            tensor = reader.get_tensor(tensor.key)
-        return save_tensors({key: tensor})
+        if not isinstance(tensor, _LazyRef):
+            return save_tensors({key: tensor})
+
+        reader = self._get_reader(tensor)
+        data = save_tensors({key: reader.get_tensor(tensor.key)})
+        if _DROP_FILE_CACHE:
+            try:
+                with open(tensor.file_path, "rb") as source:
+                    _drop_file_cache(source)
+            except OSError:
+                logger.debug("Could not open %s to release cached pages", tensor.file_path, exc_info=True)
+        return data
 
     def _get_reader(self, ref: _LazyRef):
         # Use pread to reuse the file and header without retaining a full-model memory mapping.
@@ -307,6 +330,11 @@ class DiskTensorConsumer(ItemConsumer):
                 self._file_counter += 1
                 with open(file_path, "wb") as f:
                     f.write(item)
+                    if _DROP_FILE_CACHE:
+                        # DONTNEED can only discard clean pages.
+                        f.flush()
+                        os.fdatasync(f.fileno())
+                        _drop_file_cache(f)
                 for key in metadata:
                     if key in result:
                         raise ValueError(

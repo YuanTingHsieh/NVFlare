@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import threading
+import weakref
 
 import pytest
 
@@ -25,6 +26,26 @@ class _TaskHandle(StreamTaskSpec):
 
     def cancel(self):
         self.cancel_called = True
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
+def test_settled_future_releases_task_handle(outcome):
+    task = _TaskHandle()
+    future = StreamFuture(stream_id=1, task_handle=task)
+    task.future = future
+    task_ref = weakref.ref(task)
+
+    if outcome == "completed":
+        future.set_result(1024)
+    elif outcome == "failed":
+        future.set_exception(StreamError("send failed"))
+    else:
+        assert future.cancel()
+        assert task.cancel_called
+
+    del task
+    assert future.done()
+    assert task_ref() is None
 
 
 def test_stream_future_cancel_marks_future_done_and_invokes_callback():

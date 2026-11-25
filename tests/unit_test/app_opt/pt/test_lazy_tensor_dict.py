@@ -113,6 +113,30 @@ class TestLazyRef:
         assert all(refs[key].get_metadata() == tensor_metadata(tensor) for key, tensor in tensors.items())
         assert all(ref._temp_ref is None for ref in refs.values())
 
+    def test_ref_creation_disables_read_ahead_without_mapping_checkpoint(self, tmp_path, monkeypatch):
+        path = tmp_path / "model.safetensors"
+        tensor = torch.ones(3, dtype=torch.bfloat16)
+        save_file({"weight": tensor}, path, metadata={"nvflare_model_id": "original"})
+        advised = []
+
+        def advise(fd, offset, length, advice):
+            advised.append((os.fstat(fd).st_size, offset, length, advice))
+
+        def unexpected_mapping(*args, **kwargs):
+            pytest.fail("Creating lazy references must not map the checkpoint")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "POSIX_FADV_RANDOM", 1, raising=False)
+            patch.setattr(os, "posix_fadvise", advise, raising=False)
+            patch.setattr(lazy_tensor_dict, "safe_open", unexpected_mapping)
+            refs = safetensors_refs(str(path))
+
+        assert advised == [(path.stat().st_size, 0, 0, 1)]
+        assert torch.equal(refs["weight"].materialize(), tensor)
+        save_file({"weight": tensor}, path, metadata={"nvflare_model_id": "replacement"})
+        with pytest.raises(RuntimeError, match="model was replaced"):
+            refs["weight"].materialize()
+
 
 class TestWriteSafetensors:
     def test_roundtrip_in_declared_order(self, tmp_path):
