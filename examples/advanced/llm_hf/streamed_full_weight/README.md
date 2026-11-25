@@ -109,6 +109,13 @@ The restored directory contains `model.safetensors`, the model config and the to
 
 Local validation used a tiny BF16 Llama checkpoint for three rounds with two simulated clients. Every saved tensor matched the mean of the two client updates, both transformer blocks changed, and Transformers loaded the restored model and produced finite logits. The Slurm job export and site configuration were checked separately.
 
+Run the CPU integration check from the repository root. It generates its own checkpoint and tokenizer.
+
+```bash
+python -m pip install -e . pytest torch 'transformers>=5,<6'
+python -m pytest -q tests/integration_test/slow/llama_streamed_full_weight_test.py
+```
+
 ## Runtime changes
 
 NVFlare already provides task execution, disk-backed FedAvg, and disk-backed tensor streaming. The pilot changes carried in this branch avoid read-ahead during checkpoint header scans, keep verified task artifacts as lazy references, advise the kernel to drop cached streaming pages, and release settled stream task handles. The two environment variables are process-level pilot switches. The page-cache switch is read when the streaming module loads, so set it only on the server for this example. The example uses internal lazy-tensor types and is tied to this branch.
