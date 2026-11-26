@@ -1,6 +1,6 @@
 # Tested Llama 3 70B Slurm job
 
-The [run report](../pilot-report.pdf) covers this job. Two sites each ran one full-weight BF16 SGD step during one federated round. The server accepted both 141 GB updates, ran disk-backed FedAvg and archived the global model.
+The [one-round run report](https://github.com/YuanTingHsieh/NVFlare/blob/bdf729a42219efb48bce4ed34a5107b947e83620/examples/advanced/llm_hf/streamed_full_weight/pilot-report.pdf) covers this job. Two sites each ran one full-weight BF16 SGD step during one federated round. The server accepted both 141 GB updates, ran disk-backed FedAvg and archived the global model.
 
 This directory contains the exact [training source](streamed_full_weight_smoke.py.txt) and the [NVFlare runtime wheel](nvflare-2.10.0.dev261119-py3-none-any.whl) from the run. The source has a `.txt` suffix to preserve it byte-for-byte. Copy it to a `.py` file before exporting. The wheel includes the tested Slurm and disk-streaming patches. The scheduler account, partitions, paths and service startup are site configuration.
 
@@ -50,4 +50,4 @@ As an NVFlare admin, submit the exported folder after both clients connect:
 submit_job /shared/experiments/llama3-70b-tested/jobs/llama-streamed-full-weight-smoke
 ```
 
-The run reached `FINISHED:COMPLETED`. Its output archive contains `FL_global_model.safetensors`, which stores the aggregated weights as 4,653 pieces. The [restore command](../README.md#verify-and-restore-the-output) in the current-runtime example can reassemble these pieces into Llama tensor names for Transformers. The restore path was validated separately with the tiny fixture.
+The run reached `FINISHED:COMPLETED`. Its output archive contains `FL_global_model.safetensors`, which stores the aggregated weights as 4,653 pieces. The [restore command](../README.md#verify-and-restore-the-output) in the current-runtime example reassembles these pieces into Llama tensor names for Transformers.

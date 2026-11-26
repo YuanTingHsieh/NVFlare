@@ -2,13 +2,9 @@
 
 This proof of concept runs one full-weight SGD step per client per round and streams the complete BF16 model through disk-backed FedAvg.
 
-## Tested 70B job
+## Three-round Slurm validation
 
-The [tested Slurm job](pilot/README.md) includes the exact training source and NVFlare wheel used for the completed Meta Llama 3 70B run. Two clients each took one full-weight BF16 SGD step in a single federated round. The [report](pilot-report.pdf) describes that job, its results, and its Slurm setup.
-
-## Current-runtime example
-
-The following instructions use `job.py`, the port to this branch's NVFlare runtime. It was validated with a three-round, two-client CPU simulation on a tiny BF16 Llama, including checkpoint restoration. Its Slurm export and site configuration were checked locally. To reproduce the completed 70B run, follow the tested job instructions above.
+`job.py` completed three rounds of full-weight BF16 FedAvg with two clients on Meta Llama 3 70B in 3h 21m 35s. Each client took one SGD step per round. The server accepted all six updates, and the final checkpoint restored to 723 original tensors covering all 70,553,706,496 parameters. In each round, all 32,768 sampled output-projection values matched the calculated mean of the two client updates. The [run report](pilot-report.pdf) records the configuration, timings, and memory usage for commit `bdf729a42`.
 
 ## Prepare and export the job
 
@@ -26,7 +22,7 @@ mkdir -p "$work"
 python "$example/job.py" prepare "$model" --workspace "$work/prepared"
 python "$example/job.py" export "$model" \
   --index "$work/prepared/model.safetensors.index.json" \
-  --workspace "$work/jobs" --device cuda --rounds 1
+  --workspace "$work/jobs" --device cuda --rounds 3
 ```
 
 The preparation step splits large tensors into pieces of up to 32 MiB. It hard-links shards that still contain unsplit tensors, so the original checkpoint and prepared directory must be on the same filesystem. The model, prepared index and experiment paths must be visible at the same absolute paths from the relevant processes.
@@ -41,7 +37,7 @@ submit_job /shared/experiments/llama3-70b/jobs/llama-streamed-full-weight-smoke
 
 Provision one server and clients named `site-1` and `site-2`. Run the server parent (SP) and server job (SJ) together in a 64 GiB CPU Slurm allocation with the process server job launcher. Run each client parent (CP) in its own 16 GiB CPU Slurm allocation with scheduler access. `ClientProcessJobLauncher` starts the client job (CJ) as a process in that same allocation. The CJ requests GPU task workers through its CP, which submits them to Slurm. Each worker runs in a separate allocation.
 
-Each worker requests one GPU, 8 GiB of host RAM and 45 minutes in Slurm. Set `--gpus-per-node` if your site's scheduler requires a larger allocation. The training script uses one visible GPU. Size the SP and CP allocations to cover the whole campaign, including scheduler waits and result uploads.
+Each worker requests one GPU, 8 GiB of host RAM and 45 minutes in Slurm by default. The validated run used `--gpus-per-node 4` to satisfy the site's minimum allocation. The training script uses one visible GPU. The server and client CPU allocations had a six-hour time limit to allow for three rounds, scheduler waits, and result uploads.
 
 On the server, create a private, disk-backed temporary directory and set these environment variables before starting the parent. The server job inherits them.
 
@@ -120,4 +116,4 @@ python -m pytest -q tests/integration_test/slow/llama_streamed_full_weight_test.
 
 NVFlare already provides task execution, disk-backed FedAvg, and disk-backed tensor streaming. The pilot changes carried in this branch avoid read-ahead during checkpoint header scans, keep verified task artifacts as lazy references, advise the kernel to drop cached streaming pages, and release settled stream task handles. The two environment variables are process-level pilot switches. The page-cache switch is read when the streaming module loads, so set it only on the server for this example. The example uses internal lazy-tensor types and is tied to this branch.
 
-`job.py` ports the [tested training script](pilot/streamed_full_weight_smoke.py.txt) and uses the Process coordinator support from [PR #5771](https://github.com/NVIDIA/NVFlare/pull/5771).
+`job.py` uses the Process coordinator support from [PR #5771](https://github.com/NVIDIA/NVFlare/pull/5771). The [earlier one-round job and runtime wheel](pilot/README.md) are packaged separately.
